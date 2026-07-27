@@ -1,0 +1,80 @@
+# com_navigation waypoints.yaml
+# Trajectory 1 (안내 경로): start -> wp_1 -> wp_2 -> wp_3 -> wp_4 -> dest_(A|B|C)
+# Trajectory 2 (복귀 경로): dest_(A|B|C) -> wp_5 -> wp_6 -> charge_wait -> align_point -> dock_point
+# 좌표는 임시 더미값 (SLAM 지도 완성 후 실측값으로 교체 예정)
+
+waypoints:
+  - id: "start"
+    x: 0.0
+    y: 0.0
+    theta: 0.0
+
+  - id: "wp_1"
+    x: 1.20
+    y: 0.50
+    theta: 0.0
+
+  - id: "wp_2"
+    x: 2.30
+    y: 1.50
+    theta: 90.0
+
+  - id: "wp_3"
+    x: 3.50
+    y: 2.00
+    theta: 90.0
+
+  - id: "wp_4"
+    x: 5.00
+    y: 2.80
+    theta: 0.0
+
+  - id: "dest_A"
+    x: 6.80
+    y: 3.10
+    theta: 0.0
+    aruco_marker_id: 11
+
+  - id: "dest_B"
+    x: 6.80
+    y: 1.50
+    theta: 0.0
+    aruco_marker_id: 12
+
+  - id: "dest_C"
+    x: 6.80
+    y: -0.20
+    theta: 0.0
+    aruco_marker_id: 13
+
+  - id: "wp_5"
+    x: 4.50
+    y: 1.00
+    theta: 180.0
+
+  - id: "wp_6"
+    x: 2.00
+    y: 0.30
+    theta: 180.0
+
+  - id: "charge_wait"
+    x: 0.80
+    y: 0.10
+    theta: 180.0
+
+  - id: "align_point"
+    x: 0.30
+    y: 0.05
+    theta: 180.0
+
+  - id: "dock_point"
+    x: 0.05
+    y: 0.0
+    theta: 180.0
+    aruco_marker_id: 99
+
+trajectory_1:
+  waypoint_ids: ["start", "wp_1", "wp_2", "wp_3", "wp_4"]
+
+trajectory_2:
+  waypoint_ids: ["wp_5", "wp_6", "charge_wait", "align_point", "dock_point"]
