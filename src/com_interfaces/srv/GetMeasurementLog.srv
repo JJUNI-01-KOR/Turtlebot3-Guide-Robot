@@ -1,0 +1,5 @@
+string waypoint_id_filter
+string date_filter
+---
+bool success
+com_interfaces/EnvData[] records

@@ -7,18 +7,20 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-
 find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/StartMission.srv"
+  "srv/GetMeasurementLog.srv"
+  "msg/EnvData.msg"
+  "msg/ArucoMarker.msg"
+  "msg/SystemError.msg"
+  "msg/RobotState.msg"
+  DEPENDENCIES geometry_msgs builtin_interfaces
 )
-
-find_package(std_msgs REQUIRED)
-
-find_package(geometry_msgs REQUIRED)
-
-find_package(builtin_interfaces REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

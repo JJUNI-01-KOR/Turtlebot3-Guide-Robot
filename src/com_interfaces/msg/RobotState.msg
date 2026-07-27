@@ -1,0 +1,4 @@
+geometry_msgs/Pose2D pose
+float32 battery_percent
+string mission_state
+string current_waypoint_id
