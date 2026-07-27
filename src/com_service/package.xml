@@ -12,6 +12,8 @@
   <depend>std_srvs</depend>
   <depend>nav2_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>com_interfaces</depend>
+
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
@@ -21,4 +23,6 @@
   <export>
     <build_type>ament_python</build_type>
   </export>
+
+
 </package>

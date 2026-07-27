@@ -2,6 +2,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import UInt8
 from std_srvs.srv import Trigger
+from com_interfaces.srv import StartMission
 
 from com_service.mission_state import MissionState
 
@@ -92,14 +93,14 @@ class ServiceManagerNode(Node):
         # 출력 토픽
         self.state_code_pub = self.create_publisher(UInt8, '/state_code', 10)
 
-        # 서비스 (7/27 robot_interfaces 확정 후 StartMission.srv로 교체 예정)
+        # 서비스
         self.cancel_mission_srv = self.create_service(
             Trigger, '/cancel_mission', self.on_cancel_mission
         )
-        # TODO(7/27): /start_mission 은 StartMission.srv 확정 후 구현
-        # self.start_mission_srv = self.create_service(
-        #     StartMission, '/start_mission', self.on_start_mission
-        # )
+
+        self.start_mission_srv = self.create_service(
+            StartMission, '/start_mission', self.on_start_mission
+        )
 
         # 상태전이 판단 타이머 5Hz (DDS-001 2.1 타이머 주기)
         self.state_timer = self.create_timer(0.2, self.on_state_timer)
@@ -108,11 +109,33 @@ class ServiceManagerNode(Node):
 
         self.get_logger().info('service_manager node started (skeleton)')
 
+    def on_start_mission(self, request, response):
+        dest = request.destination_id
+        if dest not in ('A', 'B', 'C'):
+            response.success = False
+            response.message = f'잘못된 목적지 ID: {dest}'
+            self.get_logger().warn(response.message)
+            return response
+
+        if self.state_machine.state != MissionState.READY:
+            response.success = False
+            response.message = f'현재 상태({self.state_machine.state.name})에서는 임무를 시작할 수 없습니다'
+            self.get_logger().warn(response.message)
+            return response
+
+        # TODO(8/3): SafetyMonitor 배터리 90% 이상 체크 연동
+        self.state_machine.transition(MissionState.GUIDING)
+        self.get_logger().info(f'start_mission requested: destination={dest}')
+        response.success = True
+        response.message = '안내를 시작합니다'
+        return response
+
     def on_cancel_mission(self, request, response):
-        # TODO(8/6): 실제 취소 로직, PAUSED 전이
+        # TODO(8/6): PAUSED 전이 시 SafetyMonitor.stop_and_hold() 등 안전 정지 연동
+        self.state_machine.transition(MissionState.PAUSED)
         self.get_logger().info('cancel_mission requested')
         response.success = True
-        response.message = 'not implemented yet'
+        response.message = '임무를 취소합니다'
         return response
 
     def on_state_timer(self):
