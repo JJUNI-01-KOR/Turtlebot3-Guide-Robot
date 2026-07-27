@@ -1,16 +1,18 @@
 import os
+import math
 import yaml
 
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from rclpy.duration import Duration
 
-from std_msgs.msg import UInt8
+from std_msgs.msg import UInt8, String, Float32
 from std_srvs.srv import Trigger
+from sensor_msgs.msg import Range
+from geometry_msgs.msg import Twist
 from com_interfaces.srv import StartMission
+from com_interfaces.msg import ArucoMarker
 from nav2_msgs.action import NavigateToPose
-from geometry_msgs.msg import PoseStamped
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -80,33 +82,155 @@ class WaypointSequencer:
 
 class DockingController:
     """ArUco 기반 정밀 도킹 제어 (SR-008~SR-011, 핵심 신규 기술)
-    TODO(7/30~7/31): /aruco_marker 구독, lateral_error/distance_error 기반
-                      저속(<=0.05m/s) /cmd_vel 계산
+
+    입력: /aruco_marker (ArucoMarker.msg) - DOCKING 상태에서만 처리
+    출력: /cmd_vel (저속, docking_speed_limit 이하)
     """
+
     def __init__(self, node: Node):
         self.node = node
-        self.docking_speed_limit = 0.05
-        self.docking_max_attempts = 3
-        self.attempt_count = 0
+        self.docking_speed_limit = node.get_parameter('docking_speed_limit').value
+        self.docking_max_attempts = node.get_parameter('docking_max_attempts').value
+        self.aruco_search_max = node.get_parameter('aruco_search_max').value
+        self.dock_marker_id = node.get_parameter('dock_marker_id').value
 
-    def compute_docking_velocity(self, marker_pose):
-        raise NotImplementedError
+        self.lateral_tolerance = 0.02
+        self.distance_tolerance = 0.03
+
+        self.attempt_count = 0
+        self.search_count = 0
+        self.last_marker_stamp = None
+        self.active = False
+
+        self.k_lateral = 0.8
+        self.k_distance = 0.3
+
+    def start(self):
+        self.active = True
+        self.attempt_count = 0
+        self.search_count = 0
+        self.last_marker_stamp = self.node.get_clock().now()
+        self.node.get_logger().info('DockingController 시작: ArUco 마커 탐색 대기')
+
+    def stop(self):
+        self.active = False
+        self.node.publish_cmd_vel(0.0, 0.0)
+
+    def on_aruco_marker(self, msg: ArucoMarker):
+        if not self.active:
+            return
+        if msg.marker_id != self.dock_marker_id:
+            return
+
+        self.last_marker_stamp = self.node.get_clock().now()
+        self.search_count = 0
+
+        if self._is_aligned(msg):
+            self._on_dock_success()
+            return
+
+        lin, ang = self.compute_docking_velocity(msg)
+        self.node.publish_cmd_vel(lin, ang)
+
+    def compute_docking_velocity(self, marker: ArucoMarker):
+        lateral = marker.lateral_error
+        distance = marker.distance_error
+
+        angular_z = -self.k_lateral * lateral
+        linear_x = self.k_distance * distance
+
+        linear_x = max(-self.docking_speed_limit, min(self.docking_speed_limit, linear_x))
+        angular_z = max(-0.3, min(0.3, angular_z))
+
+        return linear_x, angular_z
+
+    def _is_aligned(self, marker: ArucoMarker) -> bool:
+        return (abs(marker.lateral_error) <= self.lateral_tolerance
+                and abs(marker.distance_error) <= self.distance_tolerance)
+
+    def _on_dock_success(self):
+        self.active = False
+        self.node.publish_cmd_vel(0.0, 0.0)
+        self.node.get_logger().info('정밀 도킹 완료 (정렬 오차 허용범위 이내)')
+        self.node.state_machine.transition(MissionState.DOCKED)
+
+    def check_marker_timeout(self):
+        if not self.active or self.last_marker_stamp is None:
+            return
+
+        elapsed = (self.node.get_clock().now() - self.last_marker_stamp).nanoseconds / 1e9
+        if elapsed < 5.0:
+            return
+
+        self.search_count += 1
+        if self.search_count > self.aruco_search_max:
+            self.node.get_logger().error('ArUco 마커 재탐색 3회 실패 -> 정지 후 관리자 알림')
+            self.active = False
+            self.node.publish_cmd_vel(0.0, 0.0)
+            self.node.state_machine.transition(MissionState.ERROR)
+            return
+
+        self.attempt_count += 1
+        if self.attempt_count > self.docking_max_attempts:
+            self.node.get_logger().error('도킹 시도 3회 실패 -> 정지 상태 유지, 관리자 알림 (SR-011)')
+            self.active = False
+            self.node.publish_cmd_vel(0.0, 0.0)
+            self.node.state_machine.transition(MissionState.ERROR)
+            return
+
+        self.node.get_logger().warn(
+            f'ArUco 마커 미검출 {elapsed:.1f}s -> 15도 회전 재탐색 ({self.search_count}/{self.aruco_search_max})'
+        )
+        self.node.publish_cmd_vel(0.0, 0.26)
+        self.last_marker_stamp = self.node.get_clock().now()
 
 
 class SafetyMonitor:
-    """긴급정지/장애물/배터리 등 안전 이벤트 종합 판단 (SR-021~SR-026)
-    TODO(7/30, 8/3): /rear_ir, /button_event, 배터리 체크 로직
-    """
+    """긴급정지/장애물/배터리 등 안전 이벤트 종합 판단 (SR-021~SR-026)"""
+
     def __init__(self, node: Node):
         self.node = node
-        self.obstacle_stop_distance = 0.20
-        self.battery_return_threshold = 20
+        self.obstacle_stop_distance = node.get_parameter('obstacle_stop_distance').value
+        self.battery_return_threshold = node.get_parameter('battery_return_threshold').value
 
-    def check_battery(self):
-        raise NotImplementedError
+        self.battery_voltage_full = 12.6
+        self.battery_voltage_empty = 9.0
+        self.last_battery_percent = 100.0
+        self.battery_return_triggered = False
 
-    def handle_obstacle(self, msg):
-        raise NotImplementedError
+    def handle_rear_ir(self, msg: Range):
+        if msg.range <= self.obstacle_stop_distance:
+            self.node.get_logger().warn(
+                f'후방 장애물 감지 ({msg.range:.2f}m <= {self.obstacle_stop_distance}m) -> 즉시 정지'
+            )
+            self.node.publish_cmd_vel(0.0, 0.0)
+
+    def handle_button_event(self, msg: String):
+        if msg.data == 'long':
+            self.node.get_logger().warn('긴급정지 버튼(길게 누름) 입력 -> EMERGENCY_STOP')
+            self.node.publish_cmd_vel(0.0, 0.0)
+            self.node.state_machine.transition(MissionState.EMERGENCY_STOP)
+        elif msg.data == 'short':
+            self.node.get_logger().info('물리 버튼(짧게 누름) 입력 감지')
+
+    def check_battery(self, voltage: float):
+        span = self.battery_voltage_full - self.battery_voltage_empty
+        percent = (voltage - self.battery_voltage_empty) / span * 100.0
+        percent = max(0.0, min(100.0, percent))
+        self.last_battery_percent = percent
+
+        active_states = (
+            MissionState.GUIDING, MissionState.ARRIVED, MissionState.PERSON_WAIT,
+        )
+        if percent <= self.battery_return_threshold and self.node.state_machine.state in active_states:
+            if not self.battery_return_triggered:
+                self.node.get_logger().warn(
+                    f'배터리 {percent:.1f}% <= {self.battery_return_threshold}% -> 임무 중단, 복귀 우선 (SR-022)'
+                )
+                self.battery_return_triggered = True
+                self.node.state_machine.transition(MissionState.RETURNING)
+        elif percent > self.battery_return_threshold:
+            self.battery_return_triggered = False
 
 
 class MissionStateMachine:
@@ -114,13 +238,17 @@ class MissionStateMachine:
     def __init__(self, node: Node):
         self.node = node
         self.state = MissionState.SYSTEM_INIT
-
     def transition(self, new_state: MissionState):
         self.node.get_logger().info(
             f'[state] {self.state.name} -> {new_state.name}'
         )
         self.state = new_state
         self.node.publish_state_code(new_state)
+
+        if new_state == MissionState.DOCKING:
+            self.node.docking_controller.start()
+        else:
+            self.node.docking_controller.stop()
 
 
 class ServiceManagerNode(Node):
@@ -156,6 +284,7 @@ class ServiceManagerNode(Node):
         self.declare_parameter('nav_timeout', 60.0)
         self.declare_parameter('xy_goal_tolerance', 0.03)
         self.declare_parameter('nav_retry_max', 3)
+        self.declare_parameter('dock_marker_id', 99)
 
         self.nav_timeout = self.get_parameter('nav_timeout').value
         self.nav_retry_max = self.get_parameter('nav_retry_max').value
@@ -169,12 +298,26 @@ class ServiceManagerNode(Node):
         self.waypoint_sequencer.load_waypoints()
 
         self.state_code_pub = self.create_publisher(UInt8, '/state_code', 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self.cancel_mission_srv = self.create_service(
             Trigger, '/cancel_mission', self.on_cancel_mission
         )
         self.start_mission_srv = self.create_service(
             StartMission, '/start_mission', self.on_start_mission
+        )
+
+        self.aruco_marker_sub = self.create_subscription(
+            ArucoMarker, '/aruco_marker', self.on_aruco_marker, 10
+        )
+        self.rear_ir_sub = self.create_subscription(
+            Range, '/rear_ir', self.on_rear_ir, 10
+        )
+        self.button_event_sub = self.create_subscription(
+            String, '/button_event', self.on_button_event, 10
+        )
+        self.battery_voltage_sub = self.create_subscription(
+            Float32, '/battery_voltage', self.on_battery_voltage, 10
         )
 
         self.nav_action_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
@@ -185,6 +328,7 @@ class ServiceManagerNode(Node):
         self.battery_timer = self.create_timer(1.0, self.on_battery_timer)
 
         self.get_logger().info('service_manager node started (skeleton)')
+
 
     def on_start_mission(self, request, response):
         dest = request.destination_id
@@ -219,8 +363,22 @@ class ServiceManagerNode(Node):
         response.message = '임무를 취소합니다'
         return response
 
+    def on_aruco_marker(self, msg: ArucoMarker):
+        if self.state_machine.state == MissionState.DOCKING:
+            self.docking_controller.on_aruco_marker(msg)
+
+    def on_rear_ir(self, msg: Range):
+        self.safety_monitor.handle_rear_ir(msg)
+
+    def on_button_event(self, msg: String):
+        self.safety_monitor.handle_button_event(msg)
+
+    def on_battery_voltage(self, msg: Float32):
+        self.safety_monitor.check_battery(msg.data)
+
     def on_state_timer(self):
-        pass
+        if self.state_machine.state == MissionState.DOCKING:
+            self.docking_controller.check_marker_timeout()
 
     def on_battery_timer(self):
         pass
@@ -295,12 +453,12 @@ class ServiceManagerNode(Node):
     def on_waypoint_arrived(self):
         wp_id = self.waypoint_sequencer.current_waypoint_id()
         if wp_id and wp_id.startswith('dest_'):
-            self.get_logger().info('목적지 도착 -> ARRIVED (ArUco 검증은 7/30~ 예정)')
+            self.get_logger().info('목적지 도착 -> ARRIVED (ArUco 검증은 8/3~ 예정)')
             self.state_machine.transition(MissionState.ARRIVED)
             return
 
         if wp_id == 'dock_point':
-            self.get_logger().info('충전 대기점 도착 -> DOCKING (정밀 도킹은 7/30~ 예정)')
+            self.get_logger().info('충전 대기점 도착 -> DOCKING (정밀 도킹 제어 시작)')
             self.state_machine.transition(MissionState.DOCKING)
             return
 
@@ -353,6 +511,12 @@ class ServiceManagerNode(Node):
         msg = UInt8()
         msg.data = code
         self.state_code_pub.publish(msg)
+
+    def publish_cmd_vel(self, linear_x: float, angular_z: float):
+        msg = Twist()
+        msg.linear.x = linear_x
+        msg.angular.z = angular_z
+        self.cmd_vel_pub.publish(msg)
 
 
 def main(args=None):
