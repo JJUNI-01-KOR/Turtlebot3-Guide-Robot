@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'com_vision'
 
@@ -10,12 +12,16 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'),
+            glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'),
+            glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='com',
     maintainer_email='com@todo.todo',
-    description='TODO: Package description',
+    description='ArUco 마커 검출 + 사람 감지 통합 노드 (aruco)',
     license='TODO: License declaration',
     extras_require={
         'test': [
@@ -24,6 +30,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'aruco_node = com_vision.aruco_node:main',
         ],
     },
 )

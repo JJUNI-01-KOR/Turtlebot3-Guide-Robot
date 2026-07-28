@@ -1,80 +1,108 @@
-# com_navigation waypoints.yaml
-# Trajectory 1 (안내 경로): start -> wp_1 -> wp_2 -> wp_3 -> wp_4 -> dest_(A|B|C)
-# Trajectory 2 (복귀 경로): dest_(A|B|C) -> wp_5 -> wp_6 -> charge_wait -> align_point -> dock_point
-# 좌표는 임시 더미값 (SLAM 지도 완성 후 실측값으로 교체 예정)
-
 waypoints:
-  - id: "start"
-    x: 0.0
-    y: 0.0
-    theta: 0.0
+  - id: docking
+    label: "도킹"
+    x: 1.0792808532714844
+    y: 1.051103115081787
+    yaw: 0.0
 
-  - id: "wp_1"
-    x: 1.20
-    y: 0.50
-    theta: 0.0
+  - id: room1
+    label: "강의실1"
+    x: 6.3635125160217285
+    y: 0.6220113039016724
+    yaw: 0.0
 
-  - id: "wp_2"
-    x: 2.30
-    y: 1.50
-    theta: 90.0
+  - id: room2
+    label: "강의실2"
+    x: 12.383821487426758
+    y: 0.42982569336891174
+    yaw: 0.0
 
-  - id: "wp_3"
-    x: 3.50
-    y: 2.00
-    theta: 90.0
+  - id: room3
+    label: "강의실3"
+    x: 18.271087646484375
+    y: 0.35396164655685425
+    yaw: 0.0
 
-  - id: "wp_4"
-    x: 5.00
-    y: 2.80
-    theta: 0.0
+  - id: room4
+    label: "강의실4"
+    x: 23.226722717285156
+    y: 0.12761448323726654
+    yaw: 0.0
 
-  - id: "dest_A"
-    x: 6.80
-    y: 3.10
-    theta: 0.0
-    aruco_marker_id: 11
+  - id: room5
+    label: "강의실5"
+    x: 16.854475021362305
+    y: -0.7773160338401794
+    yaw: 0.0
 
-  - id: "dest_B"
-    x: 6.80
-    y: 1.50
-    theta: 0.0
-    aruco_marker_id: 12
+  - id: way6
+    label: "way6"
+    x: 9.268064498901367
+    y: -0.732704222202301
+    yaw: 0.0
 
-  - id: "dest_C"
-    x: 6.80
-    y: -0.20
-    theta: 0.0
-    aruco_marker_id: 13
+  - id: way7
+    label: "way7"
+    x: 3.8027846813201904
+    y: -0.6026007533073425
+    yaw: 0.0
 
-  - id: "wp_5"
-    x: 4.50
-    y: 1.00
-    theta: 180.0
+  - id: way8
+    label: "way8"
+    x: 2.306335687637329
+    y: -1.122928500175476
+    yaw: 0.0
 
-  - id: "wp_6"
-    x: 2.00
-    y: 0.30
-    theta: 180.0
+  - id: way9
+    label: "way9"
+    x: 3.0437028408050537
+    y: -4.353332042694092
+    yaw: 0.0
 
-  - id: "charge_wait"
-    x: 0.80
-    y: 0.10
-    theta: 180.0
+  - id: way10
+    label: "way10"
+    x: 5.190770626068115
+    y: -6.564756393432617
+    yaw: 0.0
 
-  - id: "align_point"
-    x: 0.30
-    y: 0.05
-    theta: 180.0
+  - id: way11
+    label: "way11"
+    x: 11.458502769470215
+    y: -5.177224159240723
+    yaw: 0.0
 
-  - id: "dock_point"
-    x: 0.05
-    y: 0.0
-    theta: 180.0
-    aruco_marker_id: 99
+  - id: room6
+    label: "회의실"
+    x: 12.564574241638184
+    y: -3.6379098892211914
+    yaw: 0.0
 
-trajectory_1:
-  waypoint_ids: ["start", "wp_1", "wp_2", "wp_3", "wp_4"]
+  - id: way13
+    label: "way13"
+    x: 7.858353614807129
+    y: -5.350655555725098
+    yaw: 0.0
 
-trajectory_2:
-  waypoint_ids: ["wp_5", "wp_6", "charge_wait", "align_point", "dock_point"]
+  - id: way14
+    label: "way14"
+    x: 7.424611568450928
+    y: -2.5755441188812256
+    yaw: 0.0
+
+  - id: way15
+    label: "way15"
+    x: 2.588271379470825
+    y: -2.163595676422119
+    yaw: 0.0
+
+  - id: way16
+    label: "way16"
+    x: 7.858353614807129
+    y: -5.350655555725098
+    yaw: 0.0
+
+  - id: docking2
+    label: "도킹2"
+    x: 1.0701473951339722
+    y: 0.5898393392562866
+    yaw: 0.0

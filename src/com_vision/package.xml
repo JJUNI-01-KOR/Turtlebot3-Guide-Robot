@@ -3,9 +3,18 @@
 <package format="3">
   <name>com_vision</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>ArUco 마커 검출 + 사람 감지 통합 노드 (aruco)</description>
   <maintainer email="com@todo.todo">com</maintainer>
   <license>TODO: License declaration</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>com_interfaces</depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
