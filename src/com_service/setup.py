@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-		'service_manager_node = com_service.service_manager_node:main',
+            'service_manager_node = com_service.service_manager_node:main',
         ],
     },
 )

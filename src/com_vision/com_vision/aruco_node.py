@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-aruco_node.py
-=============
 DDS-001(상세설계명세서) 2.4절 aruco 노드 스펙 구현.
 
 역할:
@@ -68,9 +66,9 @@ class MarkerDetector:
         # 마커의 3D 모서리 좌표 (마커 중심 기준, solvePnP용)
         half = self.marker_size / 2.0
         self.obj_points = np.array([
-            [-half,  half, 0],
-            [ half,  half, 0],
-            [ half, -half, 0],
+            [-half, half, 0],
+            [half, half, 0],
+            [half, -half, 0],
             [-half, -half, 0],
         ], dtype=np.float32)
 
@@ -86,7 +84,7 @@ class MarkerDetector:
 
     def compute_pose_error(self, corners):
         """
-        검출된 마커 1개의 코너 좌표 -> (pose, lateral_error, distance_error)
+        검출된 마커 1개의 코너 좌표 -> (pose, lateral_error, distance_error).
 
         lateral_error : 마커 중심-로봇(카메라) 중심의 좌우 오차 (m)
         distance_error: 마커까지의 거리 (m)
@@ -246,10 +244,14 @@ class ArucoNode(Node):
                 # ROS camera_calibration 표준 yaml 포맷:
                 # camera_matrix / distortion_coefficients가 {rows, cols, data} dict로 저장됨
                 cm = calib['camera_matrix']
-                camera_matrix = np.array(cm['data'], dtype=np.float64).reshape(cm['rows'], cm['cols'])
+                camera_matrix = np.array(
+                    cm['data'], dtype=np.float64
+                ).reshape(cm['rows'], cm['cols'])
 
                 dc = calib.get('distortion_coefficients', calib.get('dist_coeffs'))
-                dist_coeffs = np.array(dc['data'], dtype=np.float64).reshape(dc['rows'], dc['cols'])
+                dist_coeffs = np.array(
+                    dc['data'], dtype=np.float64
+                ).reshape(dc['rows'], dc['cols'])
 
                 self.get_logger().info(f'카메라 캘리브레이션 로드 완료: {path}')
                 return camera_matrix, dist_coeffs

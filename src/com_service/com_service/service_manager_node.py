@@ -1,5 +1,4 @@
 import os
-import math
 import yaml
 
 import rclpy
@@ -20,7 +19,7 @@ from com_service.mission_state import MissionState
 
 
 class WaypointSequencer:
-    """Trajectory1/2 웨이포인트 순차 제어 (SR-006)"""
+    """Trajectory1/2 웨이포인트 순차 제어 (SR-006)."""
 
     def __init__(self, node: Node):
         self.node = node
@@ -81,7 +80,8 @@ class WaypointSequencer:
 
 
 class DockingController:
-    """ArUco 기반 정밀 도킹 제어 (SR-008~SR-011, 핵심 신규 기술)
+    """
+    ArUco 기반 정밀 도킹 제어 (SR-008~SR-011, 핵심 신규 기술).
 
     입력: /aruco_marker (ArucoMarker.msg) - DOCKING 상태에서만 처리
     출력: /cmd_vel (저속, docking_speed_limit 이하)
@@ -179,14 +179,15 @@ class DockingController:
             return
 
         self.node.get_logger().warn(
-            f'ArUco 마커 미검출 {elapsed:.1f}s -> 15도 회전 재탐색 ({self.search_count}/{self.aruco_search_max})'
+            f'ArUco 마커 미검출 {elapsed:.1f}s -> 15도 회전 재탐색 '
+            f'({self.search_count}/{self.aruco_search_max})'
         )
         self.node.publish_cmd_vel(0.0, 0.26)
         self.last_marker_stamp = self.node.get_clock().now()
 
 
 class SafetyMonitor:
-    """긴급정지/장애물/배터리 등 안전 이벤트 종합 판단 (SR-021~SR-026)"""
+    """긴급정지/장애물/배터리 등 안전 이벤트 종합 판단 (SR-021~SR-026)."""
 
     def __init__(self, node: Node):
         self.node = node
@@ -222,10 +223,12 @@ class SafetyMonitor:
         active_states = (
             MissionState.GUIDING, MissionState.ARRIVED, MissionState.PERSON_WAIT,
         )
-        if percent <= self.battery_return_threshold and self.node.state_machine.state in active_states:
+        is_active = self.node.state_machine.state in active_states
+        if percent <= self.battery_return_threshold and is_active:
             if not self.battery_return_triggered:
                 self.node.get_logger().warn(
-                    f'배터리 {percent:.1f}% <= {self.battery_return_threshold}% -> 임무 중단, 복귀 우선 (SR-022)'
+                    f'배터리 {percent:.1f}% <= {self.battery_return_threshold}% '
+                    '-> 임무 중단, 복귀 우선 (SR-022)'
                 )
                 self.battery_return_triggered = True
                 self.node.state_machine.transition(MissionState.RETURNING)
@@ -234,10 +237,12 @@ class SafetyMonitor:
 
 
 class MissionStateMachine:
-    """SDD-001 3장 상태 머신 본체"""
+    """SDD-001 3장 상태 머신 본체."""
+
     def __init__(self, node: Node):
         self.node = node
         self.state = MissionState.SYSTEM_INIT
+
     def transition(self, new_state: MissionState):
         self.node.get_logger().info(
             f'[state] {self.state.name} -> {new_state.name}'
@@ -252,7 +257,7 @@ class MissionStateMachine:
 
 
 class ServiceManagerNode(Node):
-    """DDS-001 2.1 service_manager 노드 골격"""
+    """DDS-001 2.1 service_manager 노드 골격."""
 
     STATE_CODE_MAP = {
         MissionState.SYSTEM_INIT: 0x01,
@@ -328,7 +333,6 @@ class ServiceManagerNode(Node):
         self.battery_timer = self.create_timer(1.0, self.on_battery_timer)
 
         self.get_logger().info('service_manager node started (skeleton)')
-
 
     def on_start_mission(self, request, response):
         dest = request.destination_id
