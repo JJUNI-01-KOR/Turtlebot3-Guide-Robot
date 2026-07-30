@@ -19,15 +19,23 @@ from com_service.mission_state import MissionState
 
 
 class WaypointSequencer:
-    """Trajectory1/2 웨이포인트 순차 제어 (SR-006)."""
+    """
+    목적지 웨이포인트 순차 제어 (SR-006).
+
+    목적지 ID는 waypoints.yaml에 정의된 각 웨이포인트의 'id'를 그대로 사용한다
+    (8개 강의실/회의실 구조 재설계 반영, 구 'dest_A/B/C' 합성 키 방식 폐기).
+    """
 
     def __init__(self, node: Node):
         self.node = node
         self.waypoints = {}
-        self.trajectory_1_ids = []
-        self.trajectory_2_ids = []
+        self.destination_ids = []
+        self.docking_waypoint_id = node.get_parameter('docking_waypoint_id').value
+        self.route_prefix_ids = []
+        self.route_return_ids = []
         self.current_trajectory = []
         self.current_index = -1
+        self.destination_id = None
 
     def load_waypoints(self, yaml_path: str = None):
         if yaml_path is None:
@@ -44,23 +52,35 @@ class WaypointSequencer:
         for wp in data.get('waypoints', []):
             self.waypoints[wp['id']] = wp
 
-        self.trajectory_1_ids = data.get('trajectory_1', {}).get('waypoint_ids', [])
-        self.trajectory_2_ids = data.get('trajectory_2', {}).get('waypoint_ids', [])
+        self.destination_ids = [
+            wp['id'] for wp in data.get('waypoints', []) if wp.get('is_destination')
+        ]
+        # 도킹 지점 -> 목적지 공통 경유 웨이포인트(선택 사항, 없으면 목적지로 직행)
+        self.route_prefix_ids = data.get('trajectory_1', {}).get('waypoint_ids', [])
+        self.route_return_ids = data.get('trajectory_2', {}).get('waypoint_ids', [])
+
+        if self.docking_waypoint_id not in self.waypoints:
+            self.node.get_logger().warn(
+                f"docking_waypoint_id='{self.docking_waypoint_id}' 이(가) "
+                'waypoints.yaml에 없습니다 - DOCKING 전이가 발생하지 않습니다'
+            )
 
         self.node.get_logger().info(
-            f'waypoints loaded: {len(self.waypoints)}개, '
-            f'trajectory1={self.trajectory_1_ids}, trajectory2={self.trajectory_2_ids}'
+            f'waypoints loaded: {len(self.waypoints)}개, destinations={self.destination_ids}'
         )
         return True
 
+    def is_valid_destination(self, destination_id: str) -> bool:
+        return destination_id in self.destination_ids
+
     def build_trajectory_1(self, destination_id: str):
-        dest_key = f'dest_{destination_id}'
-        self.current_trajectory = self.trajectory_1_ids + [dest_key]
+        self.destination_id = destination_id
+        self.current_trajectory = self.route_prefix_ids + [destination_id]
         self.current_index = -1
 
-    def build_trajectory_2(self, destination_id: str):
-        dest_key = f'dest_{destination_id}'
-        self.current_trajectory = [dest_key] + self.trajectory_2_ids
+    def build_trajectory_2(self, destination_id: str = None):
+        self.destination_id = destination_id
+        self.current_trajectory = self.route_return_ids + [self.docking_waypoint_id]
         self.current_index = -1
 
     def has_next(self) -> bool:
@@ -192,6 +212,7 @@ class SafetyMonitor:
     def __init__(self, node: Node):
         self.node = node
         self.obstacle_stop_distance = node.get_parameter('obstacle_stop_distance').value
+        self.obstacle_search_max = node.get_parameter('obstacle_search_max').value
         self.battery_return_threshold = node.get_parameter('battery_return_threshold').value
 
         self.battery_voltage_full = 12.6
@@ -199,12 +220,60 @@ class SafetyMonitor:
         self.last_battery_percent = 100.0
         self.battery_return_triggered = False
 
+        self._obstacle_active = False
+        self._obstacle_retry_count = 0
+        self._state_before_obstacle = None
+
+    def reset_obstacle_retries(self):
+        self._obstacle_retry_count = 0
+
+    NAV_DRIVEN_STATES = (
+        MissionState.GUIDING, MissionState.RETURNING, MissionState.PERSON_WAIT,
+    )
+
     def handle_rear_ir(self, msg: Range):
-        if msg.range <= self.obstacle_stop_distance:
-            self.node.get_logger().warn(
-                f'후방 장애물 감지 ({msg.range:.2f}m <= {self.obstacle_stop_distance}m) -> 즉시 정지'
+        obstacle_present = msg.range <= self.obstacle_stop_distance
+
+        # 즉시 정지는 상태와 무관하게 항상 적용 (안전 최우선)
+        if obstacle_present:
+            self.node.publish_cmd_vel(0.0, 0.0)
+
+        is_nav_driven = self.node.state_machine.state in self.NAV_DRIVEN_STATES
+
+        if obstacle_present and not self._obstacle_active and is_nav_driven:
+            self._on_obstacle_detected(msg.range)
+        elif not obstacle_present and self._obstacle_active:
+            self._on_obstacle_cleared()
+
+    def _on_obstacle_detected(self, distance: float):
+        self._obstacle_active = True
+        self._state_before_obstacle = self.node.state_machine.state
+        # Nav2가 계속 /cmd_vel을 발행해 정지 명령을 덮어쓰는 것을 막기 위해 goal 자체를 취소
+        self.node.cancel_current_nav_goal()
+        self.node.publish_cmd_vel(0.0, 0.0)
+        self.node.get_logger().warn(
+            f'후방 장애물 감지 ({distance:.2f}m <= {self.obstacle_stop_distance}m) '
+            '-> Nav2 goal 취소 후 정지 (SR-021)'
+        )
+        self.node.state_machine.transition(MissionState.OBSTACLE_STOP)
+
+    def _on_obstacle_cleared(self):
+        self._obstacle_active = False
+        self._obstacle_retry_count += 1
+
+        if self._obstacle_retry_count > self.obstacle_search_max:
+            self.node.get_logger().error(
+                f'장애물 재시도 {self.obstacle_search_max}회 초과 -> 정지 상태 유지, 관리자 알림'
             )
             self.node.publish_cmd_vel(0.0, 0.0)
+            self.node.state_machine.transition(MissionState.ERROR)
+            return
+
+        self.node.get_logger().info(
+            f'후방 장애물 해제 -> 이동 재개 ({self._obstacle_retry_count}/{self.obstacle_search_max})'
+        )
+        self.node.state_machine.transition(self._state_before_obstacle)
+        self.node.resend_current_waypoint()
 
     def handle_button_event(self, msg: String):
         if msg.data == 'long':
@@ -289,7 +358,8 @@ class ServiceManagerNode(Node):
         self.declare_parameter('nav_timeout', 60.0)
         self.declare_parameter('xy_goal_tolerance', 0.03)
         self.declare_parameter('nav_retry_max', 3)
-        self.declare_parameter('dock_marker_id', 99)
+        self.declare_parameter('dock_marker_id', 29)
+        self.declare_parameter('docking_waypoint_id', 'docking')
 
         self.nav_timeout = self.get_parameter('nav_timeout').value
         self.nav_retry_max = self.get_parameter('nav_retry_max').value
@@ -336,9 +406,12 @@ class ServiceManagerNode(Node):
 
     def on_start_mission(self, request, response):
         dest = request.destination_id
-        if dest not in ('A', 'B', 'C'):
+        if not self.waypoint_sequencer.is_valid_destination(dest):
             response.success = False
-            response.message = f'잘못된 목적지 ID: {dest}'
+            response.message = (
+                f'잘못된 목적지 ID: {dest} '
+                f'(사용 가능: {self.waypoint_sequencer.destination_ids})'
+            )
             self.get_logger().warn(response.message)
             return response
 
@@ -350,6 +423,7 @@ class ServiceManagerNode(Node):
 
         self.destination_id = dest
         self.waypoint_sequencer.build_trajectory_1(dest)
+        self.safety_monitor.reset_obstacle_retries()
         self.state_machine.transition(MissionState.GUIDING)
         self.get_logger().info(f'start_mission requested: destination={dest}')
 
@@ -456,17 +530,28 @@ class ServiceManagerNode(Node):
 
     def on_waypoint_arrived(self):
         wp_id = self.waypoint_sequencer.current_waypoint_id()
-        if wp_id and wp_id.startswith('dest_'):
-            self.get_logger().info('목적지 도착 -> ARRIVED (ArUco 검증은 8/3~ 예정)')
-            self.state_machine.transition(MissionState.ARRIVED)
-            return
 
-        if wp_id == 'dock_point':
+        if wp_id == self.waypoint_sequencer.docking_waypoint_id:
             self.get_logger().info('충전 대기점 도착 -> DOCKING (정밀 도킹 제어 시작)')
             self.state_machine.transition(MissionState.DOCKING)
             return
 
+        if wp_id and wp_id == self.waypoint_sequencer.destination_id:
+            self.get_logger().info('목적지 도착 -> ARRIVED (ArUco 검증은 8/3~ 예정)')
+            self.state_machine.transition(MissionState.ARRIVED)
+            return
+
         self.send_next_waypoint()
+
+    def resend_current_waypoint(self):
+        wp = self.waypoint_sequencer.waypoints.get(
+            self.waypoint_sequencer.current_waypoint_id()
+        )
+        if wp is None:
+            self.get_logger().error('재개할 웨이포인트를 찾을 수 없음')
+            self.state_machine.transition(MissionState.ERROR)
+            return
+        self._send_nav_goal(wp)
 
     def on_trajectory_complete(self):
         pass

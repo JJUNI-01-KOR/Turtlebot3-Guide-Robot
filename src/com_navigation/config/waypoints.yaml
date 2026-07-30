@@ -7,30 +7,35 @@ waypoints:
 
   - id: room1
     label: "강의실1"
+    is_destination: true
     x: 6.3635125160217285
     y: 0.6220113039016724
     yaw: 0.0
 
   - id: room2
     label: "강의실2"
+    is_destination: true
     x: 12.383821487426758
     y: 0.42982569336891174
     yaw: 0.0
 
   - id: room3
     label: "강의실3"
+    is_destination: true
     x: 18.271087646484375
     y: 0.35396164655685425
     yaw: 0.0
 
   - id: room4
     label: "강의실4"
+    is_destination: true
     x: 23.226722717285156
     y: 0.12761448323726654
     yaw: 0.0
 
   - id: room5
     label: "강의실5"
+    is_destination: true
     x: 16.854475021362305
     y: -0.7773160338401794
     yaw: 0.0
@@ -73,6 +78,7 @@ waypoints:
 
   - id: room6
     label: "회의실"
+    is_destination: true
     x: 12.564574241638184
     y: -3.6379098892211914
     yaw: 0.0

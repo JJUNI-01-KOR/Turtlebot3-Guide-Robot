@@ -211,7 +211,7 @@ class ArucoNode(Node):
         self.sampler = FrameSampler()
         self.bridge = CvBridge()
 
-        self._last_frame_time = None
+        self._last_frame_time = time.monotonic()
         self._error_reported = False
 
         sensor_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
