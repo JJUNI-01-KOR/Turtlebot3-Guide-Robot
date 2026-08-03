@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'serial_bridge_node = com_sensors.serial_bridge_node:main',
+            'hmi_bridge_node = com_sensors.hmi_bridge_node:main',
         ],
     },
 )

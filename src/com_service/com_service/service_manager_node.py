@@ -360,10 +360,12 @@ class ServiceManagerNode(Node):
         self.declare_parameter('nav_retry_max', 3)
         self.declare_parameter('dock_marker_id', 29)
         self.declare_parameter('docking_waypoint_id', 'docking')
+        self.declare_parameter('startup_ready_delay', 3.0)
 
         self.nav_timeout = self.get_parameter('nav_timeout').value
         self.nav_retry_max = self.get_parameter('nav_retry_max').value
         self.nav_retry_count = 0
+        self.startup_ready_delay = self.get_parameter('startup_ready_delay').value
 
         self.state_machine = MissionStateMachine(self)
         self.docking_controller = DockingController(self)
@@ -374,6 +376,7 @@ class ServiceManagerNode(Node):
 
         self.state_code_pub = self.create_publisher(UInt8, '/state_code', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.battery_percent_pub = self.create_publisher(Float32, '/battery_percent', 10)
 
         self.cancel_mission_srv = self.create_service(
             Trigger, '/cancel_mission', self.on_cancel_mission
@@ -403,6 +406,17 @@ class ServiceManagerNode(Node):
         self.battery_timer = self.create_timer(1.0, self.on_battery_timer)
 
         self.get_logger().info('service_manager node started (skeleton)')
+
+        # SYSTEM_INIT -> LOCALIZING -> READY (SR-031: 30초 이내 active).
+        # 실제 AMCL 수렴 판정은 미구현이라, 정해진 대기시간 후 READY로 전이한다.
+        self.state_machine.transition(MissionState.LOCALIZING)
+        self._ready_timer = self.create_timer(self.startup_ready_delay, self._on_ready_timer)
+
+    def _on_ready_timer(self):
+        self._ready_timer.cancel()
+        self._ready_timer = None
+        if self.state_machine.state == MissionState.LOCALIZING:
+            self.state_machine.transition(MissionState.READY)
 
     def on_start_mission(self, request, response):
         dest = request.destination_id
@@ -459,7 +473,9 @@ class ServiceManagerNode(Node):
             self.docking_controller.check_marker_timeout()
 
     def on_battery_timer(self):
-        pass
+        self.battery_percent_pub.publish(
+            Float32(data=self.safety_monitor.last_battery_percent)
+        )
 
     def send_next_waypoint(self):
         if not self.waypoint_sequencer.has_next():
