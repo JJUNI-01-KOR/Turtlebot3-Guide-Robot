@@ -19,6 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ArucoMarker.msg"
   "msg/SystemError.msg"
   "msg/RobotState.msg"
+  "msg/TtsRequest.msg"
   DEPENDENCIES geometry_msgs builtin_interfaces
 )
 

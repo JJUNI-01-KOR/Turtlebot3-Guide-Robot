@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'service_manager_node = com_service.service_manager_node:main',
+            'com_voice_node = com_service.voice_node:main',
         ],
     },
 )
