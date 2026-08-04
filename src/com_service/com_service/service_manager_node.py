@@ -318,6 +318,7 @@ class MissionStateMachine:
         )
         self.state = new_state
         self.node.publish_state_code(new_state)
+        self.node.publish_mission_state(new_state)
 
         if new_state == MissionState.DOCKING:
             self.node.docking_controller.start()
@@ -377,6 +378,8 @@ class ServiceManagerNode(Node):
         self.state_code_pub = self.create_publisher(UInt8, '/state_code', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.battery_percent_pub = self.create_publisher(Float32, '/battery_percent', 10)
+        self.mission_state_pub = self.create_publisher(String, '/mission_state', 10)
+        self.current_waypoint_pub = self.create_publisher(String, '/current_waypoint_id', 10)
 
         self.cancel_mission_srv = self.create_service(
             Trigger, '/cancel_mission', self.on_cancel_mission
@@ -408,6 +411,8 @@ class ServiceManagerNode(Node):
 
         self.state_timer = self.create_timer(0.2, self.on_state_timer)
         self.battery_timer = self.create_timer(1.0, self.on_battery_timer)
+        # 늦게 켜진 status 노드도 최신 상태를 받을 수 있도록 1초마다 재발행
+        self.mission_state_timer = self.create_timer(1.0, self.on_mission_state_timer)
 
         self.get_logger().info('service_manager node started (skeleton)')
 
@@ -452,8 +457,12 @@ class ServiceManagerNode(Node):
         return response
 
     def on_cancel_mission(self, request, response):
+        # v3: cancel = 관리자 확인 겸용. SDD-001의 'PAUSED/ERROR -> 관리자 확인 -> READY'
+        # 절차를 GUI 취소 버튼으로 수행할 수 있게 READY로 직접 복귀한다.
         self.cancel_current_nav_goal()
-        self.state_machine.transition(MissionState.PAUSED)
+        self.docking_controller.stop()
+        self.publish_cmd_vel(0.0, 0.0)
+        self.state_machine.transition(MissionState.READY)
         self.get_logger().info('cancel_mission requested')
         response.success = True
         response.message = '임무를 취소합니다'
@@ -496,6 +505,7 @@ class ServiceManagerNode(Node):
             return
 
         self.get_logger().info(f'다음 웨이포인트로 이동: {wp_id} ({wp["x"]}, {wp["y"]})')
+        self.publish_current_waypoint(wp_id)
         self.nav_retry_count = 0
         self._send_nav_goal(wp)
 
@@ -620,6 +630,23 @@ class ServiceManagerNode(Node):
         msg = UInt8()
         msg.data = code
         self.state_code_pub.publish(msg)
+
+    def on_mission_state_timer(self):
+        # 상태 전이가 없어도 주기적으로 현재 상태/경유점을 다시 발행
+        self.publish_mission_state(self.state_machine.state)
+        self.publish_current_waypoint(self.waypoint_sequencer.current_waypoint_id())
+
+    def publish_mission_state(self, state: MissionState):
+        # GUI 대시보드가 사람이 읽을 수 있는 상태 이름을 받도록 문자열로 발행
+        msg = String()
+        msg.data = state.name
+        self.mission_state_pub.publish(msg)
+
+    def publish_current_waypoint(self, wp_id):
+        # GUI 대시보드의 '현재 경유점' 표시용. wp_id가 None이면 빈 문자열 발행
+        msg = String()
+        msg.data = wp_id or ''
+        self.current_waypoint_pub.publish(msg)
 
     def publish_cmd_vel(self, linear_x: float, angular_z: float):
         msg = Twist()
