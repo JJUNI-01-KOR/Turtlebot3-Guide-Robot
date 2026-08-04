@@ -1,29 +1,40 @@
 /* ============================================================
  *  PATROL-1  ROBOT HMI  v5 (통합: 목적지 메뉴 + 이동중 눈 + 도착화면)
- *  Arduino UNO + 3.5" TFT shield (ARS36125D / MCUFRIEND_kbv) + 조이스틱
- *  480x320 landscape, 1개 보드로 메뉴/눈/상태바를 모두 처리한다.
+ *  Arduino UNO + 3.5" TFT shield (ARS36125D / MCUFRIEND_kbv)
+ *  480x320 landscape, 이 보드는 화면만 그린다.
+ *
+ *  2026-08-04 재구성: 조이스틱은 이 보드가 아니라 메인센서보드(다른 아두이노,
+ *  arduino/flaem_pir_dht11_jul31a.ino)에 물려있음. 그 보드가 raw 조이스틱 값을
+ *  파이로 보내면 hmi_bridge_node.py가 디바운스/임계값 판정을 해서 이 보드에는
+ *  이미 판정된 MOVE:UP / MOVE:DOWN / CONFIRM 명령만 시리얼로 내려준다 - 로컬
+ *  아날로그/디지털 핀을 직접 읽지 않는다.
  *
  *  화면 상태:
- *    SELECT  : waypoints.yaml 목적지 메뉴 표시, 조이스틱으로 선택
+ *    SELECT  : waypoints.yaml 목적지 메뉴 표시, 파이가 중계한 조이스틱 명령으로 선택
+ *              (목적지 CONFIRM 1번째는 확인화면, 2번째에 실제 출발)
  *    MOVING  : 스캔라인 렌더러로 그린 눈(SCAN 표정) - 이동 중
  *    ARRIVED : 웃는 눈(HAPPY) + "ARRIVED!" 문구, 3초 후 SELECT로 복귀
+ *    IDLE_SCREENSAVER : SELECT/확인화면에서 30초간 입력 없으면 진입하는 화면보호기
+ *              (IDLE 표정 눈 애니메이션, 실제 주행과 무관 - 로컬 타이머). 아무 조이스틱
+ *              입력이나 오면 그 입력은 "깨우기"로 소비하고 SELECT로 복귀.
  *
  *  ---- 시리얼 프로토콜 (개행 종료, 115200 baud) ----
  *   [보드 -> Pi]
  *     "SELECT:<destination_id>"   목적지 선택 확정 (waypoints.yaml의 id와 동일)
  *     "READY"                     부팅 완료
  *   [Pi -> 보드]
- *     "S:MOVING"                  이동 중 화면으로 전환 (com_sensors/hmi_bridge_node.py)
- *     "S:ARRIVED"                 도착 화면으로 전환
+ *     "MOVE:UP" / "MOVE:DOWN"     메뉴 커서 이동 (hmi_bridge_node.py가 조이스틱
+ *                                 raw 값에 디바운스/임계값 적용해서 보냄)
+ *     "CONFIRM"                   버튼 입력 (디바운스됨). 목적지당 두 번 눌러야 출발함:
+ *                                 1번째 - 확인화면(목적지 이름 크게 표시), 2번째 - 실제 출발.
+ *                                 확인화면 중 MOVE:UP/DOWN이 오면 취소하고 메뉴로 복귀.
+ *     "S:MOVING"                  이동 중 화면으로 전환 (state_code==0x03)
+ *     "S:ARRIVED"                 도착 화면으로 전환 (state_code==0x04)
+ *     "S:SELECT"                  메뉴 화면으로 강제 복귀 (state_code==0x0A ERROR/EMERGENCY_STOP,
+ *                                 예전엔 이 처리가 없어서 ERROR 진입 시 화면이 MOVING에 멈춰있었음)
  *     "B:<0-100>"                 배터리 퍼센트 갱신 (미배선 시 기본값 100 유지)
  *     "W:<0-4>"                   WiFi 막대 갱신 (미배선 시 기본값 4 유지)
  *  --------------------------------
- *
- *  배선(2026-08-04 실측 확정):
- *    - 조이스틱: JOY_X = A1(위아래 메뉴 이동에 사용), JOY_BTN = 13(선택)
- *    - D4는 실드가 물리적으로 물고 있어(TFT 라이브러리 호출 여부와 무관하게 항상 LOW)
- *      버튼 핀으로 못 씀 - 실측으로 확인함(핀만 비워도 LOW 유지, D13으로 옮기니 해결).
- *      혹시 실드를 바꾸거나 재배선하면 이 핀도 다시 확인할 것.
  * ============================================================ */
 #include <Adafruit_GFX.h>
 #include <MCUFRIEND_kbv.h>
@@ -43,10 +54,6 @@ MCUFRIEND_kbv tft;
 #define LOWLID  0xAD55      // 눈꺼풀 라인
 #define LIDLN   0x8C7F      // 감은 눈 선
 
-// ---------------- 조이스틱 ----------------
-#define JOY_X   A1
-#define JOY_BTN 13
-
 // ---------------- 목적지 메뉴 (waypoints.yaml is_destination:true 와 동일 순서/id 유지) ----------------
 struct Destination { const char* id; const char* label; };
 const Destination DESTINATIONS[] = {
@@ -59,10 +66,16 @@ const Destination DESTINATIONS[] = {
 };
 const int NUM_DEST = sizeof(DESTINATIONS) / sizeof(DESTINATIONS[0]);
 int cursorIdx = 0, prevCursor = -1;
+bool confirmPending = false;  // true = 목적지 확인 화면 표시 중 (한번 더 눌러야 실제 출발)
 
 // ---------------- 화면 상태 ----------------
-enum UIState { SELECT, MOVING, ARRIVED };
+enum UIState { SELECT, MOVING, ARRIVED, IDLE_SCREENSAVER };
 UIState uiState = SELECT;
+
+// 메뉴/확인화면에서 30초간 조이스틱 입력이 없으면 대기용 눈 애니메이션으로 전환
+// (실제 주행 중이라는 뜻은 아님 - 그냥 화면보호기, MOVING과 표정만 다름).
+#define IDLE_SCREENSAVER_MS 30000UL
+unsigned long lastInputAt = 0;
 
 int battery = 100, wifi = 4;
 unsigned long arrivedAt = 0;
@@ -519,6 +532,8 @@ void updateBlink(unsigned long now) {
 
 void enterSelect() {
   uiState = SELECT;
+  confirmPending = false;
+  lastInputAt = millis();
   tft.fillScreen(BLACK);
   tft.setTextColor(CYAN); tft.setTextSize(2);
   tft.setCursor(20, 10); tft.print("Select Destination");
@@ -538,18 +553,31 @@ void drawMenu() {
   }
 }
 
+// 목적지를 처음 CONFIRM 받았을 때: 바로 출발하지 않고 확인 화면을 띄운다
+// (실수로 조이스틱 버튼을 잘못 눌러 엉뚱한 곳으로 출발하는 걸 방지).
+void drawConfirmPrompt() {
+  tft.fillScreen(BLACK);
+  tft.setTextColor(CYAN); tft.setTextSize(2);
+  tft.setCursor(20, 10); tft.print("Select Destination");
+
+  tft.setTextColor(YEL); tft.setTextSize(3);
+  tft.setCursor(30, 110);
+  tft.print(DESTINATIONS[cursorIdx].label);
+
+  tft.setTextColor(WHITE); tft.setTextSize(2);
+  tft.setCursor(30, 180);
+  tft.print("Press again to go");
+
+  tft.setTextColor(GRAY); tft.setTextSize(2);
+  tft.setCursor(30, 220);
+  tft.print("Move stick to cancel");
+}
+
 void handleSelect() {
-  int y = analogRead(JOY_X);
-  static unsigned long lastMove = 0;
-  if (millis() - lastMove > 250) {
-    if (y < 300 && cursorIdx > 0)            { cursorIdx--; lastMove = millis(); }
-    if (y > 700 && cursorIdx < NUM_DEST - 1) { cursorIdx++; lastMove = millis(); }
-  }
-  if (digitalRead(JOY_BTN) == LOW) {
-    confirmSelection();
-    delay(300);  // 디바운스
-  }
-  if (cursorIdx != prevCursor) { drawMenu(); prevCursor = cursorIdx; }
+  // 커서 이동/확정은 이제 handleLine()의 MOVE:UP / MOVE:DOWN / CONFIRM 처리에서
+  // 일어난다 (파이가 조이스틱을 대신 읽어서 디바운스까지 마친 명령을 보내줌).
+  // confirmPending 중엔 확인 화면을 그대로 유지하고 메뉴를 다시 그리지 않는다.
+  if (!confirmPending && cursorIdx != prevCursor) { drawMenu(); prevCursor = cursorIdx; }
 }
 
 void confirmSelection() {
@@ -560,6 +588,26 @@ void confirmSelection() {
 void enterMoving() {
   uiState = MOVING;
   applyExpr(7);                 // SCAN
+  palOverride = 255;
+  tft.fillScreen(BLACK);
+
+  lookX = 0; lookY = 0;
+  gazePending = false;
+  eyeState = ST_CLOSED;
+  lid = LID_MAX;
+  tMark = millis();
+  blinkQueue = 0;
+  gazeAt = millis() + 1500;
+
+  drawClosedLine(leftEyeX,  eyeY);
+  drawClosedLine(rightEyeX, eyeY);
+}
+
+// 화면보호기: 실제 주행 상태(state_code)와 무관하게 메뉴/확인화면에서 30초간
+// 입력이 없을 때만 로컬에서 진입. IDLE 표정으로 MOVING과 구분되게 함.
+void enterScreensaver() {
+  uiState = IDLE_SCREENSAVER;
+  applyExpr(0);                 // IDLE
   palOverride = 255;
   tft.fillScreen(BLACK);
 
@@ -610,6 +658,55 @@ void handleLine(const char* line) {
   if (line[0] == 'W' && line[1] == ':') { wifi = atoi(line + 2); return; }
   if (strcmp(line, "S:MOVING") == 0)  { enterMoving();  return; }
   if (strcmp(line, "S:ARRIVED") == 0) { enterArrived(); return; }
+  if (strcmp(line, "S:SELECT") == 0)  { enterSelect();  return; }
+
+  // 파이(hmi_bridge_node.py)가 메인센서보드의 조이스틱 raw 값을 디바운스/임계값
+  // 판정까지 마친 뒤 보내주는 명령 - SELECT 상태에서만 의미 있음.
+  // 확인 화면(confirmPending) 중에 스틱을 움직이면 취소하고 메뉴로 돌아간다.
+  // 화면보호기 중에 아무 입력이나 오면 이번 입력은 "깨우기"로만 쓰고 메뉴로 복귀한다
+  // (바로 이동/확정까지 적용하면 자다 깬 김에 실수로 출발할 수 있어서 한 단계 둠).
+  bool isJoystickInput = strcmp(line, "MOVE:UP") == 0 ||
+                         strcmp(line, "MOVE:DOWN") == 0 ||
+                         strcmp(line, "CONFIRM") == 0;
+  if (isJoystickInput) {
+    if (uiState == IDLE_SCREENSAVER) {
+      enterSelect();
+      return;
+    }
+    if (uiState == SELECT) lastInputAt = millis();
+  }
+
+  if (strcmp(line, "MOVE:UP") == 0) {
+    if (uiState == SELECT) {
+      bool wasConfirming = confirmPending;
+      confirmPending = false;
+      if (cursorIdx > 0) cursorIdx--;
+      if (wasConfirming) prevCursor = -1;
+    }
+    return;
+  }
+  if (strcmp(line, "MOVE:DOWN") == 0) {
+    if (uiState == SELECT) {
+      bool wasConfirming = confirmPending;
+      confirmPending = false;
+      if (cursorIdx < NUM_DEST - 1) cursorIdx++;
+      if (wasConfirming) prevCursor = -1;
+    }
+    return;
+  }
+  // 첫 CONFIRM: 확인 화면 표시. 확인 화면 상태에서 두번째 CONFIRM: 실제 출발.
+  if (strcmp(line, "CONFIRM") == 0) {
+    if (uiState == SELECT) {
+      if (!confirmPending) {
+        confirmPending = true;
+        drawConfirmPrompt();
+      } else {
+        confirmPending = false;
+        confirmSelection();
+      }
+    }
+    return;
+  }
 
   // "T:<idx>" - 조이스틱 미연결 시 테스트용: 실제 버튼을 누른 것과 동일하게
   // cursorIdx를 옮기고 confirmSelection()을 호출한다 (SELECT 상태에서만 동작).
@@ -643,7 +740,6 @@ void readSerial() {
 // ============================================================
 void setup() {
   Serial.begin(115200);
-  pinMode(JOY_BTN, INPUT_PULLUP);
   randomSeed(analogRead(A0) ^ micros());
 
   uint16_t id = tft.readID();
@@ -654,7 +750,7 @@ void setup() {
     id = 0x9486;
   }
   tft.begin(id);
-  tft.setRotation(1);
+  tft.setRotation(3);
 
   applyExpr(0);
   enterSelect();
@@ -667,7 +763,11 @@ void loop() {
 
   switch (uiState) {
     case SELECT:
-      handleSelect();
+      if (millis() - lastInputAt > IDLE_SCREENSAVER_MS) {
+        enterScreensaver();
+      } else {
+        handleSelect();
+      }
       break;
     case MOVING: {
       unsigned long now = millis();
@@ -678,6 +778,12 @@ void loop() {
     case ARRIVED:
       if (millis() - arrivedAt > 3000) { enterSelect(); }
       break;
+    case IDLE_SCREENSAVER: {
+      unsigned long now = millis();
+      updateGaze(now);
+      updateBlink(now);
+      break;
+    }
   }
 
   drawStatusBar();
