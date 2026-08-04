@@ -19,9 +19,11 @@
  *     "W:<0-4>"                   WiFi 막대 갱신 (미배선 시 기본값 4 유지)
  *  --------------------------------
  *
- *  배선(가정, 실측 후 조정 필요):
- *    - 조이스틱: JOY_Y = A5(위아래), JOY_BTN = 10(선택) - 실드가 A0~A4를 쓰므로
- *      남는 핀인지 실제 실드 핀맵으로 재확인할 것.
+ *  배선(2026-08-04 실측 확정):
+ *    - 조이스틱: JOY_X = A1(위아래 메뉴 이동에 사용), JOY_BTN = 13(선택)
+ *    - D4는 실드가 물리적으로 물고 있어(TFT 라이브러리 호출 여부와 무관하게 항상 LOW)
+ *      버튼 핀으로 못 씀 - 실측으로 확인함(핀만 비워도 LOW 유지, D13으로 옮기니 해결).
+ *      혹시 실드를 바꾸거나 재배선하면 이 핀도 다시 확인할 것.
  * ============================================================ */
 #include <Adafruit_GFX.h>
 #include <MCUFRIEND_kbv.h>
@@ -42,8 +44,8 @@ MCUFRIEND_kbv tft;
 #define LIDLN   0x8C7F      // 감은 눈 선
 
 // ---------------- 조이스틱 ----------------
-#define JOY_Y   A5
-#define JOY_BTN 10
+#define JOY_X   A1
+#define JOY_BTN 13
 
 // ---------------- 목적지 메뉴 (waypoints.yaml is_destination:true 와 동일 순서/id 유지) ----------------
 struct Destination { const char* id; const char* label; };
@@ -537,7 +539,7 @@ void drawMenu() {
 }
 
 void handleSelect() {
-  int y = analogRead(JOY_Y);
+  int y = analogRead(JOY_X);
   static unsigned long lastMove = 0;
   if (millis() - lastMove > 250) {
     if (y < 300 && cursorIdx > 0)            { cursorIdx--; lastMove = millis(); }
@@ -645,7 +647,12 @@ void setup() {
   randomSeed(analogRead(A0) ^ micros());
 
   uint16_t id = tft.readID();
-  if (id == 0x0000 || id == 0xFFFF || id == 0xD3D3) id = 0x9486;
+  Serial.print("TFT_ID:0x");
+  Serial.println(id, HEX);
+  if (id == 0x0000 || id == 0xFFFF || id == 0xD3D3) {
+    Serial.println("TFT_ID_FALLBACK: 실제 컨트롤러 응답 없음, 0x9486으로 강제 진행");
+    id = 0x9486;
+  }
   tft.begin(id);
   tft.setRotation(1);
 
