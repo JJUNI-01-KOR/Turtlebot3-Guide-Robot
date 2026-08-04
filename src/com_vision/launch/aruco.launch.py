@@ -5,6 +5,20 @@ from launch_ros.actions import Node
 def generate_launch_description():
     return LaunchDescription([
         Node(
+            package='camera_ros',
+            executable='camera_node',
+            name='camera',
+            output='screen',
+            parameters=[{
+                # camera_ros 기본 픽셀포맷(NV12/NV21)은 cv_bridge가 인식 못 해서
+                # aruco_node의 imgmsg_to_cv2(desired_encoding='bgr8')가 매 프레임 실패함.
+                # RGB888로 고정해야 aruco_node가 실제로 프레임을 받는다.
+                'format': 'RGB888',
+                'width': 640,
+                'height': 480,
+            }],
+        ),
+        Node(
             package='com_vision',
             executable='aruco_node',
             name='aruco',
@@ -20,22 +34,6 @@ def generate_launch_description():
                     'imx219__base_soc_i2c0mux_i2c_1_imx219_10_640x480.yaml',
                 'markers_yaml_package': 'com_navigation',
                 'markers_yaml_relpath': 'config/aruco_markers.yaml',
-            }],
-        ),
-        Node(
-            package='image_rotate',
-            executable='image_rotate',
-            name='image_rotate',
-            output='screen',
-            remappings=[('image', '/camera/image_raw')],
-            parameters=[{
-                'use_camera_info': False,
-                'target_x': 0.0,
-                'target_y': 1.0,
-                'target_z': 0.0,
-                'source_x': 0.0,
-                'source_y': -1.0,
-                'source_z': 0.0,
             }],
         ),
     ])

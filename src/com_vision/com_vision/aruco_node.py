@@ -156,9 +156,15 @@ class PersonPresenceChecker:
         self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
     def check_person_presence(self, frame_bgr) -> bool:
-        """사람이 하나라도 confidence_threshold 이상으로 검출되면 True."""
+        """사람이 하나라도 confidence_threshold 이상으로 검출되면 True.
+
+        존재 여부만 필요하므로 절반 해상도로 축소하고 스케일 스텝을 넉넉히 잡아 검출한다.
+        원본 640x480 + scale=1.05 조합은 라즈베리파이4 CPU에서 프레임당 수백ms가 걸려
+        5Hz 타이머가 계속 밀리며 aruco_node CPU 사용률이 200%를 넘게 만들었다.
+        """
+        small = cv2.resize(frame_bgr, None, fx=0.5, fy=0.5)
         boxes, weights = self.hog.detectMultiScale(
-            frame_bgr, winStride=(8, 8), padding=(8, 8), scale=1.05
+            small, winStride=(8, 8), padding=(8, 8), scale=1.2
         )
         if len(weights) == 0:
             return False
