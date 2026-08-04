@@ -7,7 +7,7 @@ from rclpy.action import ActionClient
 
 from std_msgs.msg import UInt8, String, Float32
 from std_srvs.srv import Trigger
-from sensor_msgs.msg import Range
+from sensor_msgs.msg import Range, BatteryState
 from geometry_msgs.msg import Twist
 from com_interfaces.srv import StartMission
 from com_interfaces.msg import ArucoMarker
@@ -394,8 +394,12 @@ class ServiceManagerNode(Node):
         self.button_event_sub = self.create_subscription(
             String, '/button_event', self.on_button_event, 10
         )
-        self.battery_voltage_sub = self.create_subscription(
-            Float32, '/battery_voltage', self.on_battery_voltage, 10
+        # 센서보드의 배터리분배회로는 후방 초음파 교체 과정에서 제거됨(2026-08-04, 의도적
+        # 간소화). 대신 OpenCR(turtlebot3_node)이 이미 발행하는 /battery_state.voltage를
+        # 그대로 사용 - 로봇 배터리팩(3S LiPo, 12.6V full / 9.0V empty) 실측값이라
+        # battery_voltage_full/empty 캘리브레이션과도 그대로 맞는다.
+        self.battery_state_sub = self.create_subscription(
+            BatteryState, '/battery_state', self.on_battery_state, 10
         )
 
         self.nav_action_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
@@ -465,8 +469,8 @@ class ServiceManagerNode(Node):
     def on_button_event(self, msg: String):
         self.safety_monitor.handle_button_event(msg)
 
-    def on_battery_voltage(self, msg: Float32):
-        self.safety_monitor.check_battery(msg.data)
+    def on_battery_state(self, msg: BatteryState):
+        self.safety_monitor.check_battery(msg.voltage)
 
     def on_state_timer(self):
         if self.state_machine.state == MissionState.DOCKING:
