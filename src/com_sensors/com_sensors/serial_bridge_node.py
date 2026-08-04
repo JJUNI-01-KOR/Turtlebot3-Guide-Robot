@@ -12,12 +12,16 @@ IR/PIR 센서는 프로젝트 범위에서 제외하기로 확정됨(2026-08-04)
 긴급정지버튼: 물리버튼은 구현 안 하고 GUI 버튼으로 대체 예정(com_gui, 아직 미구현).
 배터리전압: SafetyMonitor는 이 노드가 아니라 OpenCR의 /battery_state를 구독함
 (service_manager_node.py 참고, 센서보드 배터리분배회로는 제거됨).
+
+2026-08-04: 조이스틱(HMI 메뉴 선택용)이 TFT보드가 아니라 이 메인센서보드에 물려있어
+"J:<analogRead 0-1023>,B:<0/1>" 라인(약 50ms 주기)도 이 보드가 보낸다. 디바운스/
+임계값 판정은 이 노드가 아니라 hmi_bridge_node.py가 함(raw 값만 중계).
 """
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Float32, Bool
+from std_msgs.msg import Float32, Bool, Int32
 import serial
 
 
@@ -45,6 +49,8 @@ class SensorBridgeNode(Node):
         self.flame_pub = self.create_publisher(Bool, '/com_sensors/flame_detected', sensor_qos)
         self.rear_distance_pub = self.create_publisher(Float32, '/com_sensors/rear_distance', sensor_qos)
         self.rear_obstacle_pub = self.create_publisher(Bool, '/com_sensors/rear_obstacle', sensor_qos)
+        self.joystick_x_pub = self.create_publisher(Int32, '/com_sensors/joystick_x', sensor_qos)
+        self.joystick_button_pub = self.create_publisher(Bool, '/com_sensors/joystick_button', sensor_qos)
 
         self.timer = self.create_timer(0.05, self.read_serial_callback)
 
@@ -61,7 +67,22 @@ class SensorBridgeNode(Node):
         if not line:
             return
 
-        self.parse_and_publish(line)
+        if line.startswith('J:'):
+            self.parse_and_publish_joystick(line)
+        else:
+            self.parse_and_publish(line)
+
+    def parse_and_publish_joystick(self, line: str):
+        try:
+            parts = dict(item.split(':') for item in line.split(','))
+            x = int(parts['J'])
+            button = bool(int(parts['B']))
+        except (ValueError, KeyError):
+            self.get_logger().warn(f'조이스틱 패킷 파싱 실패, 무시함: {line}')
+            return
+
+        self.joystick_x_pub.publish(Int32(data=x))
+        self.joystick_button_pub.publish(Bool(data=button))
 
     def parse_and_publish(self, line: str):
         try:
