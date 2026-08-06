@@ -18,7 +18,6 @@ DDS-001 2.2절 status 노드.
 """
 
 import math
-import time
 from collections import deque
 from datetime import datetime, timezone
 
