@@ -30,7 +30,7 @@ from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from geometry_msgs.msg import PoseStamped
 
 # TODO: 실제 com_interfaces 패키지명/메시지명과 다르면 여기만 수정
@@ -219,11 +219,19 @@ class ArucoNode(Node):
 
         self._last_frame_time = time.monotonic()
         self._error_reported = False
+        # DOCKING 중에는 사람감지(HOG)를 건너뛰고 마커 검출에 CPU를 몰아준다 - 도킹
+        # 정렬은 저속 근접 주행이라 사람감지의 우선순위가 낮고, 이 시점이 바로 CPU
+        # 경합으로 마커 인식이 밀리면 안 되는 구간이라 트레이드오프가 명확함
+        # (2026-08-06, Pi4 CPU 과부하로 도킹 정렬 실패한 실물 테스트 이후 추가).
+        self._mission_state = ''
 
         sensor_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
 
         self.image_sub = self.create_subscription(
             Image, '/camera/image_raw', self.preprocess_image, sensor_qos
+        )
+        self.mission_state_sub = self.create_subscription(
+            String, '/mission_state', self._on_mission_state, 10
         )
         self.marker_pub = self.create_publisher(ArucoMarker, '/aruco_marker', 10)
         self.person_pub = self.create_publisher(Bool, '/person_detected', 10)
@@ -291,6 +299,9 @@ class ArucoNode(Node):
 
     # ── 콜백 ──
 
+    def _on_mission_state(self, msg: String):
+        self._mission_state = msg.data
+
     def preprocess_image(self, msg: Image):
         """카메라 콜백: BGR 프레임으로 변환해 최신 프레임 버퍼에 저장만 함 (검출은 타이머가 수행)."""
         try:
@@ -323,8 +334,9 @@ class ArucoNode(Node):
         corners, ids = self.detector.detect_markers(gray)
         self.publish_marker((corners, ids), stamp)
 
-        person_present = self.person_checker.check_person_presence(frame_bgr)
-        self.publish_person(person_present)
+        if self._mission_state != 'DOCKING':
+            person_present = self.person_checker.check_person_presence(frame_bgr)
+            self.publish_person(person_present)
 
     # ── 발행 ──
 
@@ -336,8 +348,21 @@ class ArucoNode(Node):
             self._publish_no_detection()
             return
 
-        marker_id = int(ids[0][0])
-        pose, lateral_error, distance_error = self.detector.compute_pose_error([corners[0]])
+        # 여러 마커가 동시에 시야에 들어오면(예: 미등록 마커 + 도킹 마커 29) OpenCV가
+        # 반환하는 순서는 검출 순서일 뿐 우선순위가 아니다 - 예전엔 무조건 ids[0]만
+        # 썼는데, 등록된(known) 마커가 있으면 그걸 우선 선택하도록 수정. 안 그러면
+        # DockingController가 도킹 마커를 dock_marker_id로 필터링하는 로직 자체가
+        # 무의미해짐(엉뚱한 마커만 계속 보고되어 도킹 마커를 매 프레임 놓칠 수 있음 -
+        # 2026-08-06 실물 도킹 실패의 유력한 원인으로 판단해 수정).
+        ids_flat = [int(i[0]) for i in ids]
+        idx = 0
+        for i, mid in enumerate(ids_flat):
+            if mid in self.known_marker_ids:
+                idx = i
+                break
+
+        marker_id = ids_flat[idx]
+        pose, lateral_error, distance_error = self.detector.compute_pose_error([corners[idx]])
 
         if pose is None:
             self._publish_no_detection()
