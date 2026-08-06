@@ -14,9 +14,13 @@ def generate_launch_description():
     default_map = os.path.join(
         get_package_share_directory('com_navigation'), 'maps', 'map.yaml'
     )
+    # com_navigation/config/nav2_params.yaml: turtlebot3_navigation2 기본값에서
+    # 라즈베리파이4 실물 CPU 부하(bt_loop_duration, DWB 샘플 수 등)를 낮추고
+    # use_sim_time 잔재 버그(global_costmap/recoveries_server)를 정정한 프로젝트
+    # 전용 파라미터 파일 (2026-08-06). 필요 시 params_file 인자로 원래 기본값
+    # (turtlebot3_navigation2 패키지 제공)으로 되돌릴 수 있음.
     default_params = os.path.join(
-        get_package_share_directory('turtlebot3_navigation2'),
-        'param', ROS_DISTRO, f'{TURTLEBOT3_MODEL}.yaml'
+        get_package_share_directory('com_navigation'), 'config', 'nav2_params.yaml'
     )
 
     map_arg = LaunchConfiguration('map')
