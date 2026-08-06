@@ -83,6 +83,20 @@ waypoints:
     y: -3.6379098892211914
     yaw: 0.0
 
+  - id: room7
+    label: "인포"
+    is_destination: true
+    x: 2.9564778804779053
+    y: -4.072195053100586
+    yaw: 0.0
+
+  - id: room8
+    label: "상담실"
+    is_destination: true
+    x: 12.709179878234863
+    y: -4.237649917602539
+    yaw: 0.0
+
   - id: way13
     label: "way13"
     x: 7.858353614807129

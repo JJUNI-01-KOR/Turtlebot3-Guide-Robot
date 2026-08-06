@@ -5,59 +5,14 @@
 # v1.1 (2026-07-27, 권오민) : 목적지 8곳 구조로 변경, 도킹 마커 ID 99 -> 29로 변경
 #                              사유: aruco_dictionary=DICT_4X4_50 (DDS-001/ICD-001 확정 사양)은
 #                              ID 0~49까지만 지원하여 99는 생성/인식 자체가 불가능함
+# v1.2 (2026-08-05) : 강의실1~5/인포/상담실/회의실 마커(21~28) 제거, 도킹 마커(29)만 유지
+#                      사유: service_manager_node의 DockingController가 dock_marker_id(29)만
+#                      필터링해서 쓰고 있고, 목적지(room1~room6) 도착 판정은 Nav2가
+#                      waypoints.yaml 좌표 기준으로 하지 마커 인식과 무관 - 미사용 확인 후 정리
 #
-# waypoints.yaml의 aruco_marker_id와 1:1 매칭됨
 # 사전: DICT_4X4_50 | 마커 실제 크기: 10cm x 10cm (marker_size=0.10m, DDS-001 기준)
 
 markers:
-  - id: 21
-    x: 4.50
-    y: 3.00
-    z: 0.15
-    description: "강의실1 목적지 마커"
-
-  - id: 22
-    x: 5.50
-    y: 3.00
-    z: 0.15
-    description: "강의실2 목적지 마커"
-
-  - id: 23
-    x: 6.50
-    y: 3.00
-    z: 0.15
-    description: "강의실3 목적지 마커"
-
-  - id: 24
-    x: 4.50
-    y: -1.00
-    z: 0.15
-    description: "강의실4 목적지 마커"
-
-  - id: 25
-    x: 5.50
-    y: -1.00
-    z: 0.15
-    description: "강의실5 목적지 마커"
-
-  - id: 26
-    x: 2.00
-    y: 3.50
-    z: 0.15
-    description: "인포 목적지 마커"
-
-  - id: 27
-    x: 4.00
-    y: -4.50
-    z: 0.15
-    description: "상담실 목적지 마커"
-
-  - id: 28
-    x: 6.50
-    y: -3.00
-    z: 0.15
-    description: "회의실 목적지 마커"
-
   - id: 29
     x: 0.05
     y: 0.0

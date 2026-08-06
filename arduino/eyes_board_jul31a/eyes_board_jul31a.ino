@@ -38,6 +38,7 @@
  * ============================================================ */
 #include <Adafruit_GFX.h>
 #include <MCUFRIEND_kbv.h>
+#include "hangul_font.h"
 
 MCUFRIEND_kbv tft;
 
@@ -55,16 +56,72 @@ MCUFRIEND_kbv tft;
 #define LIDLN   0x8C7F      // 감은 눈 선
 
 // ---------------- 목적지 메뉴 (waypoints.yaml is_destination:true 와 동일 순서/id 유지) ----------------
-struct Destination { const char* id; const char* label; };
+// 라벨은 한글로 표시한다. Adafruit_GFX 기본 폰트엔 한글 글리프가 없어서(하드웨어 제약 -
+// Uno 플래시로 완전한 Hangul 폰트를 올리는 건 비현실적), hangul_font.h의 20x20 비트맵
+// 글리프 8종(강/의/실/회/인/포/상/담)만 조합해서 그린다. 숫자는 기존 ASCII 폰트 재사용.
+struct Destination { const char* id; uint8_t glyphs[3]; char digit; };
 const Destination DESTINATIONS[] = {
-  {"room1", "Room 1"},
-  {"room2", "Room 2"},
-  {"room3", "Room 3"},
-  {"room4", "Room 4"},
-  {"room5", "Room 5"},
-  {"room6", "Meeting Room"},
+  {"room1", {G_GANG, G_UI, G_SIL}, '1'},
+  {"room2", {G_GANG, G_UI, G_SIL}, '2'},
+  {"room3", {G_GANG, G_UI, G_SIL}, '3'},
+  {"room4", {G_GANG, G_UI, G_SIL}, '4'},
+  {"room5", {G_GANG, G_UI, G_SIL}, '5'},
+  {"room6", {G_HOE, G_UI, G_SIL}, 0},
+  {"room7", {G_IN, G_PO, G_NONE}, 0},
+  {"room8", {G_SANG, G_DAM, G_SIL}, 0},
 };
 const int NUM_DEST = sizeof(DESTINATIONS) / sizeof(DESTINATIONS[0]);
+
+// 한글 비트맵 글리프 1개를 (x,y)에 scale배로 그린다 (scale=1 -> 20x20, scale=2 -> 40x40).
+void drawGlyph(int x, int y, uint8_t glyph, uint16_t color, uint8_t scale) {
+  if (glyph == G_NONE) return;
+  const uint8_t* bmp = (const uint8_t*)pgm_read_ptr(&HANGUL_BITMAPS[glyph]);
+  const uint8_t rowBytes = (HANGUL_GLYPH_W + 7) / 8;
+  for (uint8_t row = 0; row < HANGUL_GLYPH_H; row++) {
+    for (uint8_t col = 0; col < HANGUL_GLYPH_W; col++) {
+      uint8_t byteVal = pgm_read_byte(&bmp[row * rowBytes + (col / 8)]);
+      if (byteVal & (0x80 >> (col % 8))) {
+        if (scale == 1) tft.drawPixel(x + col, y + row, color);
+        else tft.fillRect(x + col * scale, y + row * scale, scale, scale, color);
+      }
+    }
+  }
+}
+
+// 글리프 최대 3개 + 숫자 접미사 1개로 구성된 목적지 라벨을 (x,y)부터 그린다.
+void drawDestLabel(int x, int y, const Destination& d, uint16_t color, uint8_t scale) {
+  const int glyphPx = HANGUL_GLYPH_W * scale;
+  const int gap = 2 * scale;
+  int cx = x;
+  for (uint8_t i = 0; i < 3; i++) {
+    if (d.glyphs[i] == G_NONE) break;
+    drawGlyph(cx, y, d.glyphs[i], color, scale);
+    cx += glyphPx + gap;
+  }
+  if (d.digit) {
+    const uint8_t textSize = (scale == 1) ? 2 : 5;
+    tft.setTextSize(textSize);
+    tft.setTextColor(color);
+    tft.setCursor(cx, y + (glyphPx - 8 * textSize) / 2);
+    tft.print(d.digit);
+  }
+}
+
+// 안내 문구(가변 길이 한글 글리프 배열, PROGMEM)를 (x,y)부터 그린다. G_SPACE는
+// 그리지 않고 커서만 진행시켜 단어 사이 띄어쓰기를 표현한다.
+void drawHangulPhrase(int x, int y, const uint8_t* phrase, uint8_t count, uint16_t color, uint8_t scale) {
+  const int glyphPx = HANGUL_GLYPH_W * scale;
+  const int gap = 2 * scale;
+  const int spacePx = glyphPx / 2 + gap;
+  int cx = x;
+  for (uint8_t i = 0; i < count; i++) {
+    uint8_t g = pgm_read_byte(&phrase[i]);
+    if (g == G_SPACE) { cx += spacePx; continue; }
+    drawGlyph(cx, y, g, color, scale);
+    cx += glyphPx + gap;
+  }
+}
+
 int cursorIdx = 0, prevCursor = -1;
 bool confirmPending = false;  // true = 목적지 확인 화면 표시 중 (한번 더 눌러야 실제 출발)
 
@@ -530,26 +587,37 @@ void updateBlink(unsigned long now) {
 //  ---- 여기부터 UI (메뉴 / 상태바 / 화면 전환) ----
 // ============================================================
 
+const uint8_t PHRASE_SELECT_TITLE[] PROGMEM = { G_MOK, G_JEOK, G_JI, G_SPACE, G_SEON, G_TAEK };           // 목적지 선택
+const uint8_t PHRASE_PRESS_AGAIN[]  PROGMEM = { G_DA, G_SI, G_SPACE, G_NU, G_REU, G_MYEON, G_SPACE, G_CHUL, G_BAL };  // 다시 누르면 출발
+const uint8_t PHRASE_CANCEL[]       PROGMEM = { G_JO, G_I, G_SEU, G_TIK, G_EU, G_RO, G_SPACE, G_CHWI, G_SO };         // 조이스틱으로 취소
+const uint8_t PHRASE_ARRIVED[]      PROGMEM = { G_DO, G_CHAK };                                            // 도착
+
 void enterSelect() {
   uiState = SELECT;
   confirmPending = false;
   lastInputAt = millis();
   tft.fillScreen(BLACK);
-  tft.setTextColor(CYAN); tft.setTextSize(2);
-  tft.setCursor(20, 10); tft.print("Select Destination");
+  drawHangulPhrase(20, 8, PHRASE_SELECT_TITLE, sizeof(PHRASE_SELECT_TITLE), CYAN, 1);
   prevCursor = -1;
   drawMenu();
 }
 
 void drawMenu() {
-  tft.setTextSize(2);
+  // NUM_DEST(현재 8개)가 6개 기준이던 기존 38px 간격으로는 화면(320px 높이) 밖으로
+  // 넘쳐서 32px 간격 + 시작 y를 50으로 당김 - 8개까지 여유있게 들어간다.
   for (int i = 0; i < NUM_DEST; i++) {
-    int yy = 65 + i * 38;
-    tft.fillRect(10, yy - 4, 340, 32, (i == cursorIdx) ? GRAY : BLACK);
-    tft.setTextColor(i == cursorIdx ? YEL : WHITE);
-    tft.setCursor(24, yy);
-    if (i == cursorIdx) tft.print("> ");
-    tft.print(DESTINATIONS[i].label);
+    int yy = 50 + i * 32;
+    tft.fillRect(10, yy - 4, 340, 28, (i == cursorIdx) ? GRAY : BLACK);
+    uint16_t color = i == cursorIdx ? YEL : WHITE;
+    int lx = 24;
+    if (i == cursorIdx) {
+      tft.setTextSize(2);
+      tft.setTextColor(YEL);
+      tft.setCursor(lx, yy + 2);
+      tft.print(">");
+      lx += 16;
+    }
+    drawDestLabel(lx, yy, DESTINATIONS[i], color, 1);
   }
 }
 
@@ -557,20 +625,12 @@ void drawMenu() {
 // (실수로 조이스틱 버튼을 잘못 눌러 엉뚱한 곳으로 출발하는 걸 방지).
 void drawConfirmPrompt() {
   tft.fillScreen(BLACK);
-  tft.setTextColor(CYAN); tft.setTextSize(2);
-  tft.setCursor(20, 10); tft.print("Select Destination");
+  drawHangulPhrase(20, 8, PHRASE_SELECT_TITLE, sizeof(PHRASE_SELECT_TITLE), CYAN, 1);
 
-  tft.setTextColor(YEL); tft.setTextSize(3);
-  tft.setCursor(30, 110);
-  tft.print(DESTINATIONS[cursorIdx].label);
+  drawDestLabel(30, 100, DESTINATIONS[cursorIdx], YEL, 2);
 
-  tft.setTextColor(WHITE); tft.setTextSize(2);
-  tft.setCursor(30, 180);
-  tft.print("Press again to go");
-
-  tft.setTextColor(GRAY); tft.setTextSize(2);
-  tft.setCursor(30, 220);
-  tft.print("Move stick to cancel");
+  drawHangulPhrase(30, 180, PHRASE_PRESS_AGAIN, sizeof(PHRASE_PRESS_AGAIN), WHITE, 1);
+  drawHangulPhrase(30, 220, PHRASE_CANCEL, sizeof(PHRASE_CANCEL), GRAY, 1);
 }
 
 void handleSelect() {
@@ -633,8 +693,9 @@ void enterArrived() {
   lookX = 0; lookY = 0;
   drawBothFull();
 
-  tft.setTextColor(GREEN); tft.setTextSize(4);
-  tft.setCursor(90, 250); tft.print("ARRIVED!");
+  drawHangulPhrase(150, 240, PHRASE_ARRIVED, sizeof(PHRASE_ARRIVED), GREEN, 3);
+  tft.setTextColor(GREEN); tft.setTextSize(6);
+  tft.setCursor(282, 246); tft.print("!");
 }
 
 void drawStatusBar() {

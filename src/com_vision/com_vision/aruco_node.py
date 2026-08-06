@@ -345,7 +345,8 @@ class ArucoNode(Node):
 
         if self.known_marker_ids and marker_id not in self.known_marker_ids:
             self.get_logger().warn(
-                f'등록되지 않은 마커 ID {marker_id} 검출됨 - aruco_markers.yaml 확인 필요'
+                f'등록되지 않은 마커 ID {marker_id} 검출됨 - aruco_markers.yaml 확인 필요',
+                throttle_duration_sec=5.0
             )
 
         msg = ArucoMarker()
