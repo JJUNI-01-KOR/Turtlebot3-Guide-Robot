@@ -13,7 +13,7 @@
  *    SELECT  : waypoints.yaml 목적지 메뉴 표시, 파이가 중계한 조이스틱 명령으로 선택
  *              (목적지 CONFIRM 1번째는 확인화면, 2번째에 실제 출발)
  *    MOVING  : 스캔라인 렌더러로 그린 눈(SCAN 표정) - 이동 중
- *    ARRIVED : 웃는 눈(HAPPY) + "ARRIVED!" 문구, 3초 후 SELECT로 복귀
+ *    ARRIVED : 웃는 눈(HAPPY) + "ARRIVED!" 문구, 5초 후 SELECT로 복귀
  *    IDLE_SCREENSAVER : SELECT/확인화면에서 30초간 입력 없으면 진입하는 화면보호기
  *              (IDLE 표정 눈 애니메이션, 실제 주행과 무관 - 로컬 타이머). 아무 조이스틱
  *              입력이나 오면 그 입력은 "깨우기"로 소비하고 SELECT로 복귀.
@@ -837,7 +837,9 @@ void loop() {
       break;
     }
     case ARRIVED:
-      if (millis() - arrivedAt > 3000) { enterSelect(); }
+      // URS-001/SDD-001 명시값(5초)과 service_manager의 arrival_wait 파라미터에
+      // 맞춤(2026-08-06, 이전 3000ms는 문서 기준과 미동기화 상태였음).
+      if (millis() - arrivedAt > 5000) { enterSelect(); }
       break;
     case IDLE_SCREENSAVER: {
       unsigned long now = millis();

@@ -4,10 +4,11 @@ import yaml
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from std_msgs.msg import UInt8, String, Float32
+from std_msgs.msg import UInt8, String, Float32, Bool
 from std_srvs.srv import Trigger
-from sensor_msgs.msg import Range, BatteryState
+from sensor_msgs.msg import BatteryState
 from geometry_msgs.msg import Twist
 from com_interfaces.srv import StartMission
 from com_interfaces.msg import ArucoMarker
@@ -224,15 +225,36 @@ class SafetyMonitor:
         self._obstacle_retry_count = 0
         self._state_before_obstacle = None
 
+        self.person_wait_retry_max = node.get_parameter('person_wait_retry_max').value
+        self._person_active = False
+        self._person_retry_count = 0
+        self._state_before_person = None
+
     def reset_obstacle_retries(self):
         self._obstacle_retry_count = 0
+
+    def reset_person_retries(self):
+        self._person_retry_count = 0
 
     NAV_DRIVEN_STATES = (
         MissionState.GUIDING, MissionState.RETURNING, MissionState.PERSON_WAIT,
     )
 
-    def handle_rear_ir(self, msg: Range):
-        obstacle_present = msg.range <= self.obstacle_stop_distance
+    def handle_rear_ir(self, msg: Float32):
+        # 실제 후방 센서는 HC-SR04 초음파(/com_sensors/rear_distance, cm 단위) -
+        # 예전엔 /rear_ir(Range, m)를 구독하도록 돼 있었는데 그 토픽을 발행하는
+        # 코드가 프로젝트 어디에도 없어서 OBSTACLE_STOP이 한 번도 실제로 동작한
+        # 적이 없었음(2026-08-06 문서 검토 중 발견, 실물 주행 여러 번 했는데도
+        # 몰랐던 버그). 아두이노가 echo 타임아웃(약 5m 이상 미검출) 시 -1.0을
+        # 보내는데 이건 "장애물 없음"으로 처리해야 함(그냥 비교하면 음수라 항상
+        # 장애물로 오탐).
+        distance_cm = msg.data
+        if distance_cm < 0:
+            obstacle_present = False
+            distance_m = float('inf')
+        else:
+            distance_m = distance_cm / 100.0
+            obstacle_present = distance_m <= self.obstacle_stop_distance
 
         # 즉시 정지는 상태와 무관하게 항상 적용 (안전 최우선)
         if obstacle_present:
@@ -241,7 +263,7 @@ class SafetyMonitor:
         is_nav_driven = self.node.state_machine.state in self.NAV_DRIVEN_STATES
 
         if obstacle_present and not self._obstacle_active and is_nav_driven:
-            self._on_obstacle_detected(msg.range)
+            self._on_obstacle_detected(distance_m)
         elif not obstacle_present and self._obstacle_active:
             self._on_obstacle_cleared()
 
@@ -275,6 +297,52 @@ class SafetyMonitor:
         self.node.state_machine.transition(self._state_before_obstacle)
         self.node.resend_current_waypoint()
 
+    def handle_person_detected(self, msg: Bool):
+        person_present = msg.data
+
+        # 장애물과 동일하게 정지 명령은 상태와 무관하게 항상 적용(안전 최우선).
+        # DOCKING 중에는 aruco_node가 애초에 /person_detected를 발행하지 않으므로
+        # (사람감지 스킵 최적화, 2026-08-06) 이 콜백 자체가 호출되지 않는다.
+        if person_present:
+            self.node.publish_cmd_vel(0.0, 0.0)
+
+        is_nav_driven = self.node.state_machine.state in self.NAV_DRIVEN_STATES
+
+        if person_present and not self._person_active and is_nav_driven:
+            self._on_person_detected()
+        elif not person_present and self._person_active:
+            self._on_person_cleared()
+
+    def _on_person_detected(self):
+        self._person_active = True
+        self._state_before_person = self.node.state_machine.state
+        # 장애물과 동일한 이유로 goal 자체를 취소(Nav2가 계속 /cmd_vel을 발행해
+        # 정지 명령을 덮어쓰는 것을 막기 위함).
+        self.node.cancel_current_nav_goal()
+        self.node.publish_cmd_vel(0.0, 0.0)
+        self.node.get_logger().warn('전방에 사람 감지 -> Nav2 goal 취소 후 정지 대기')
+        self.node.state_machine.transition(MissionState.PERSON_WAIT)
+
+    def _on_person_cleared(self):
+        self._person_active = False
+        self._person_retry_count += 1
+
+        if self._person_retry_count > self.person_wait_retry_max:
+            self.node.get_logger().error(
+                f'사람 감지-해제 반복 {self.person_wait_retry_max}회 초과 '
+                '-> 정지 상태 유지, 관리자 알림'
+            )
+            self.node.publish_cmd_vel(0.0, 0.0)
+            self.node.state_machine.transition(MissionState.ERROR)
+            return
+
+        self.node.get_logger().info(
+            f'전방 사람 감지 해제 -> 이동 재개 '
+            f'({self._person_retry_count}/{self.person_wait_retry_max})'
+        )
+        self.node.state_machine.transition(self._state_before_person)
+        self.node.resend_current_waypoint()
+
     def handle_button_event(self, msg: String):
         if msg.data == 'long':
             self.node.get_logger().warn('긴급정지 버튼(길게 누름) 입력 -> EMERGENCY_STOP')
@@ -301,6 +369,7 @@ class SafetyMonitor:
                 )
                 self.battery_return_triggered = True
                 self.node.state_machine.transition(MissionState.RETURNING)
+                self.node.start_return()
         elif percent > self.battery_return_threshold:
             self.battery_return_triggered = False
 
@@ -316,6 +385,7 @@ class MissionStateMachine:
         self.node.get_logger().info(
             f'[state] {self.state.name} -> {new_state.name}'
         )
+        self.node.cancel_hold_timer()
         self.state = new_state
         self.node.publish_state_code(new_state)
         self.node.publish_mission_state(new_state)
@@ -324,6 +394,11 @@ class MissionStateMachine:
             self.node.docking_controller.start()
         else:
             self.node.docking_controller.stop()
+
+        if new_state == MissionState.ARRIVED:
+            self.node.start_hold_timer(self.node.arrival_wait, self.node.on_arrival_timeout)
+        elif new_state == MissionState.DOCKED:
+            self.node.start_hold_timer(self.node.docked_wait, self.node.on_docked_timeout)
 
 
 class ServiceManagerNode(Node):
@@ -352,10 +427,20 @@ class ServiceManagerNode(Node):
         self.declare_parameter('battery_return_threshold', 20)
         self.declare_parameter('obstacle_stop_distance', 0.20)
         self.declare_parameter('obstacle_search_max', 2)
+        # 장애물(obstacle_search_max=2)보다 넉넉하게 잡음 - 사람은 장애물과 달리
+        # 스스로 비켜줄 것으로 기대되는 일반적인 상황이라 더 여러 번 대기-재개를
+        # 허용해도 안전하다고 판단.
+        self.declare_parameter('person_wait_retry_max', 10)
         self.declare_parameter('aruco_search_max', 3)
         self.declare_parameter('docking_max_attempts', 3)
         self.declare_parameter('docking_speed_limit', 0.05)
+        # URS-001/SDD-001 둘 다 "5초 대기"로 명시된 값 - eyes_board_jul31a.ino의
+        # ARRIVED 로컬 타이머와 반드시 일치시킬 것(안 맞으면 보드가 먼저 SELECT 메뉴로
+        # 복귀한 뒤 backend가 뒤늦게 RETURNING(S:MOVING)을 보내 화면이 튀는 버그가
+        # 생김). 2026-08-06: .ino가 3000ms로 미동기화 상태였던 걸 발견해 5000ms로
+        # 맞춤(문서 기준이 맞다고 확인됨) - 이 파라미터를 다시 낮추지 말 것.
         self.declare_parameter('arrival_wait', 5.0)
+        self.declare_parameter('docked_wait', 2.0)
         self.declare_parameter('nav_timeout', 60.0)
         self.declare_parameter('xy_goal_tolerance', 0.03)
         self.declare_parameter('nav_retry_max', 3)
@@ -367,6 +452,9 @@ class ServiceManagerNode(Node):
         self.nav_retry_max = self.get_parameter('nav_retry_max').value
         self.nav_retry_count = 0
         self.startup_ready_delay = self.get_parameter('startup_ready_delay').value
+        self.arrival_wait = self.get_parameter('arrival_wait').value
+        self.docked_wait = self.get_parameter('docked_wait').value
+        self._hold_timer = None
 
         self.state_machine = MissionStateMachine(self)
         self.docking_controller = DockingController(self)
@@ -391,11 +479,18 @@ class ServiceManagerNode(Node):
         self.aruco_marker_sub = self.create_subscription(
             ArucoMarker, '/aruco_marker', self.on_aruco_marker, 10
         )
+        # serial_bridge_node(com_sensors)가 BEST_EFFORT로 발행하므로 QoS를 맞춰야
+        # 실제로 메시지가 전달됨(기본 RELIABLE로 구독하면 QoS 불일치로 조용히 안 옴 -
+        # 오늘 세션에서 여러 번 겪은 것과 같은 패턴).
+        sensor_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.rear_ir_sub = self.create_subscription(
-            Range, '/rear_ir', self.on_rear_ir, 10
+            Float32, '/com_sensors/rear_distance', self.on_rear_ir, sensor_qos
         )
         self.button_event_sub = self.create_subscription(
             String, '/button_event', self.on_button_event, 10
+        )
+        self.person_detected_sub = self.create_subscription(
+            Bool, '/person_detected', self.on_person_detected, 10
         )
         # 센서보드의 배터리분배회로는 후방 초음파 교체 과정에서 제거됨(2026-08-04, 의도적
         # 간소화). 대신 OpenCR(turtlebot3_node)이 이미 발행하는 /battery_state.voltage를
@@ -407,6 +502,7 @@ class ServiceManagerNode(Node):
 
         self.nav_action_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
         self._nav_goal_handle = None
+        self._nav_goal_generation = 0
         self._nav_timeout_timer = None
 
         self.state_timer = self.create_timer(0.2, self.on_state_timer)
@@ -426,6 +522,36 @@ class ServiceManagerNode(Node):
         self._ready_timer = None
         if self.state_machine.state == MissionState.LOCALIZING:
             self.state_machine.transition(MissionState.READY)
+
+    def start_hold_timer(self, duration, callback):
+        self.cancel_hold_timer()
+        self._hold_timer = self.create_timer(duration, callback)
+
+    def cancel_hold_timer(self):
+        if self._hold_timer is not None:
+            self._hold_timer.cancel()
+            self._hold_timer = None
+
+    def on_arrival_timeout(self):
+        self.cancel_hold_timer()
+        if self.state_machine.state == MissionState.ARRIVED:
+            self.get_logger().info(f'ARRIVED {self.arrival_wait}s 경과 -> 복귀 시작')
+            self.state_machine.transition(MissionState.RETURNING)
+            self.start_return()
+
+    def on_docked_timeout(self):
+        self.cancel_hold_timer()
+        if self.state_machine.state == MissionState.DOCKED:
+            self.get_logger().info(f'DOCKED {self.docked_wait}s 경과 -> READY 복귀')
+            self.state_machine.transition(MissionState.READY)
+
+    def start_return(self):
+        self.get_logger().info('복귀 경로 설정 -> 도킹 지점으로 이동')
+        self.safety_monitor.reset_obstacle_retries()
+        self.safety_monitor.reset_person_retries()
+        self.nav_retry_count = 0
+        self.waypoint_sequencer.build_trajectory_2()
+        self.send_next_waypoint()
 
     def on_start_mission(self, request, response):
         dest = request.destination_id
@@ -447,6 +573,7 @@ class ServiceManagerNode(Node):
         self.destination_id = dest
         self.waypoint_sequencer.build_trajectory_1(dest)
         self.safety_monitor.reset_obstacle_retries()
+        self.safety_monitor.reset_person_retries()
         self.state_machine.transition(MissionState.GUIDING)
         self.get_logger().info(f'start_mission requested: destination={dest}')
 
@@ -472,8 +599,11 @@ class ServiceManagerNode(Node):
         if self.state_machine.state == MissionState.DOCKING:
             self.docking_controller.on_aruco_marker(msg)
 
-    def on_rear_ir(self, msg: Range):
+    def on_rear_ir(self, msg: Float32):
         self.safety_monitor.handle_rear_ir(msg)
+
+    def on_person_detected(self, msg: Bool):
+        self.safety_monitor.handle_person_detected(msg)
 
     def on_button_event(self, msg: String):
         self.safety_monitor.handle_button_event(msg)
@@ -515,6 +645,14 @@ class ServiceManagerNode(Node):
             self.state_machine.transition(MissionState.ERROR)
             return
 
+        # 재시도마다 세대를 증가시켜, 이미 대체된(취소되었거나 재시도로 밀려난) 이전
+        # goal의 accept/result 콜백이 뒤늦게 도착해도 무시할 수 있게 한다. 2026-08-06
+        # 실물 테스트에서 nav_timeout 재시도 3회가 취소 처리 전에 연달아 전송되면서,
+        # 이미 ERROR로 전이된 뒤에 예전 goal의 성공 응답이 뒤늦게 도착해 ERROR->DOCKING으로
+        # 조용히 넘어가버린 버그가 실측됨 - 세대 검사 + 아래 상태 검사로 방지.
+        self._nav_goal_generation += 1
+        generation = self._nav_goal_generation
+
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
         goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
@@ -526,11 +664,17 @@ class ServiceManagerNode(Node):
         send_future = self.nav_action_client.send_goal_async(
             goal_msg, feedback_callback=self.on_nav_feedback
         )
-        send_future.add_done_callback(self.on_goal_response)
+        send_future.add_done_callback(
+            lambda future, generation=generation: self.on_goal_response(future, generation)
+        )
 
         self._start_nav_timeout_timer()
 
-    def on_goal_response(self, future):
+    def on_goal_response(self, future, generation):
+        if generation != self._nav_goal_generation:
+            self.get_logger().debug('만료된 nav goal 응답 무시 (이미 새 목표로 대체됨)')
+            return
+
         goal_handle = future.result()
         if not goal_handle.accepted:
             self.get_logger().warn('Nav2 goal이 거부됨')
@@ -539,12 +683,24 @@ class ServiceManagerNode(Node):
 
         self._nav_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self.on_nav_result_callback)
+        result_future.add_done_callback(
+            lambda future, generation=generation: self.on_nav_result_callback(future, generation)
+        )
 
     def on_nav_feedback(self, feedback_msg):
         pass
 
-    def on_nav_result_callback(self, future):
+    def on_nav_result_callback(self, future, generation):
+        if generation != self._nav_goal_generation:
+            self.get_logger().debug('만료된 nav goal 결과 무시 (이미 새 목표로 대체됨)')
+            return
+        if self.state_machine.state not in self.safety_monitor.NAV_DRIVEN_STATES:
+            self.get_logger().warn(
+                f'nav goal 결과가 도착했지만 현재 상태({self.state_machine.state.name})는 '
+                '더 이상 주행을 기대하지 않음 - 무시'
+            )
+            return
+
         self._cancel_nav_timeout_timer()
         result = future.result()
         status = result.status
@@ -596,9 +752,13 @@ class ServiceManagerNode(Node):
                 self.waypoint_sequencer.current_waypoint_id()
             )
             self._send_nav_goal(wp)
+        elif self.state_machine.state == MissionState.RETURNING:
+            self.get_logger().error('복귀 경로 이동 3회 실패 -> ERROR (관리자 개입 필요)')
+            self.state_machine.transition(MissionState.ERROR)
         else:
             self.get_logger().error('웨이포인트 이동 3회 실패 -> 임무 실패, 복귀 시도')
             self.state_machine.transition(MissionState.RETURNING)
+            self.start_return()
 
     def _start_nav_timeout_timer(self):
         self._cancel_nav_timeout_timer()
