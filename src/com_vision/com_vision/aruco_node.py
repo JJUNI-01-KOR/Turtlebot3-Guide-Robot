@@ -29,6 +29,14 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 
+# HOG(사람감지)가 내부적으로 여러 스레드를 쓰면 Nav2(controller_server 등)의
+# 실시간성 스레드와 4코어 Pi에서 컨텍스트 스위칭 경합을 일으킨다 - 이 노드는
+# 어차피 detection_rate 주기 타이머 하나로 순차 처리하므로 멀티스레드 이득이
+# 크지 않고, 단일 스레드로 고정하는 쪽이 전체 시스템엔 더 유리하다(2026-08-11
+# 실측: Nav2+비전 동시구동 시 load average 5~6대, /initialpose가 tf 타이밍
+# 경합으로 계속 거부되는 문제 확인 후 person_detection_rate 분리와 함께 적용).
+cv2.setNumThreads(1)
+
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import PoseStamped
@@ -194,6 +202,11 @@ class ArucoNode(Node):
         self.declare_parameter('aruco_dictionary', 'DICT_4X4_50')
         self.declare_parameter('marker_size', 0.10)               # m
         self.declare_parameter('detection_rate', 5.0)             # Hz
+        # 사람감지(HOG)는 ArUco 마커 검출(도킹 정밀도 때문에 5Hz 필요)과 같은 주기로
+        # 돌 필요가 없다 - 저속 실내 주행에서 사람 존재를 1초 이내에 알면 충분하고
+        # (즉각 정지는 초음파 OBSTACLE_STOP이 더 빠른 별도 경로로 이미 담당),
+        # detection_rate와 분리해서 훨씬 낮은 주기로 돌려 CPU를 아낀다.
+        self.declare_parameter('person_detection_rate', 1.0)      # Hz
         self.declare_parameter('person_confidence_threshold', 0.5)
         self.declare_parameter('camera_frame_timeout', 1.0)       # sec (SR-025)
         self.declare_parameter(
@@ -206,6 +219,7 @@ class ArucoNode(Node):
         dictionary_name = self.get_parameter('aruco_dictionary').value
         marker_size = self.get_parameter('marker_size').value
         self.detection_period = 1.0 / self.get_parameter('detection_rate').value
+        self.person_detection_period = 1.0 / self.get_parameter('person_detection_rate').value
         person_threshold = self.get_parameter('person_confidence_threshold').value
         self.camera_timeout = self.get_parameter('camera_frame_timeout').value
 
@@ -218,6 +232,7 @@ class ArucoNode(Node):
         self.bridge = CvBridge()
 
         self._last_frame_time = time.monotonic()
+        self._last_person_check_time = 0.0
         self._error_reported = False
         # DOCKING 중에는 사람감지(HOG)를 건너뛰고 마커 검출에 CPU를 몰아준다 - 도킹
         # 정렬은 저속 근접 주행이라 사람감지의 우선순위가 낮고, 이 시점이 바로 CPU
@@ -242,6 +257,7 @@ class ArucoNode(Node):
         self.get_logger().info(
             f'aruco 노드 시작: dict={dictionary_name}, marker_size={marker_size}m, '
             f'rate={self.get_parameter("detection_rate").value}Hz, '
+            f'person_rate={self.get_parameter("person_detection_rate").value}Hz, '
             f'등록된 마커 {len(self.known_marker_ids)}개'
         )
 
@@ -334,7 +350,10 @@ class ArucoNode(Node):
         corners, ids = self.detector.detect_markers(gray)
         self.publish_marker((corners, ids), stamp)
 
-        if self._mission_state != 'DOCKING':
+        now = time.monotonic()
+        if (self._mission_state != 'DOCKING'
+                and (now - self._last_person_check_time) >= self.person_detection_period):
+            self._last_person_check_time = now
             person_present = self.person_checker.check_person_presence(frame_bgr)
             self.publish_person(person_present)
 
