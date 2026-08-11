@@ -26,10 +26,12 @@ launch가 내부적으로 자식 프로세스를 관리하는 방식이라 그 �
   넣어주지만, launch 프로세스 시작 전에 export 해두는 쪽이 더 안전하다).
 - 배터리 11V대(저전압)에서는 OpenCR이 약 90초 후 시리얼 통신 실패로 크래시하는
   현상이 실측됐다 (README §8-1) — 완충 후 기동할 것.
-- hmi_bridge_node의 serial_port 기본값이 com_sensor_bridge_node와 겹쳐서
-  (둘 다 /dev/ttyACM0) 반드시 /dev/ttyACM2로 오버라이드해야 한다.
-  실제 포트가 다르면 hmi_serial_port 인자로 바꿔서 실행할 것:
-    ros2 launch com_launch robot_all.launch.py hmi_serial_port:=/dev/ttyACM3
+- 2026-08-11: udev 규칙(99-com-robot-serial.rules, 시리얼 번호 기반)으로
+  /dev/com_sensorboard, /dev/com_tftboard 고정 심볼릭 링크를 만들어서 기본값으로
+  씀 - ttyACM 번호가 재부팅/재연결 때마다 바뀌는 문제(실물 세션에서 여러 번 겪음,
+  hmi_bridge_node가 죽은 포트를 계속 붙잡고 있어서 크래시까지 난 적 있음)를 회피.
+  이 udev 규칙이 없는 새 라즈베리파이라면 다시 ttyACM0/ttyACM2 등으로 오버라이드
+  필요(README §3 참고).
 - 임무 시작은 TFT+조이스틱 물리 UI 또는:
     ros2 service call /start_mission com_interfaces/srv/StartMission \
       "{destination_id: room1}"
@@ -75,11 +77,12 @@ def generate_launch_description():
                                             'coin_d4_driver를 자동 포함'),
         DeclareLaunchArgument('map', default_value=default_map),
         DeclareLaunchArgument('params_file', default_value=default_params),
-        DeclareLaunchArgument('sensor_serial_port', default_value='/dev/ttyACM0',
-                               description='com_sensor_bridge_node (메인센서보드)'),
-        DeclareLaunchArgument('hmi_serial_port', default_value='/dev/ttyACM2',
-                               description='hmi_bridge_node (TFT보드) - 반드시 '
-                                            'com_sensor_bridge_node와 다른 포트'),
+        DeclareLaunchArgument('sensor_serial_port', default_value='/dev/com_sensorboard',
+                               description='com_sensor_bridge_node (메인센서보드) - '
+                                            '99-com-robot-serial.rules 고정 심볼릭 링크'),
+        DeclareLaunchArgument('hmi_serial_port', default_value='/dev/com_tftboard',
+                               description='hmi_bridge_node (TFT보드) - '
+                                            '99-com-robot-serial.rules 고정 심볼릭 링크'),
 
         SetEnvironmentVariable('TURTLEBOT3_MODEL', turtlebot3_model),
         SetEnvironmentVariable('LDS_MODEL', lds_model),
