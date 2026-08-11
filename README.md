@@ -1,10 +1,50 @@
 # TurtleBot3 기반 방문자 안내 로봇 (COM팀)
 
-> **최종 업데이트: 2026-08-11** — 실제 자율주행 성공(GUIDING→ARRIVED→RETURNING까지 실측 완료),
-> 도킹은 정렬 단계 재검증 필요. 아래 내용은 "구현 예정"이 아니라 **실제 동작 확인된 현재 상태** 기준입니다.
-> 8/11: 음성 안내(`/tts_request`) 실제 연결 완료(더 이상 무음 아님), 사람감지 CPU 최적화,
-> `com_launch`에 전체 노드 통합 launch 파일 추가. 단, `/initialpose`가 계속 거부되는 문제를
-> 새로 발견해 실제 주행 재검증은 막혀 있음(§12 참고).
+> **최종 업데이트: 2026-08-11.** 아래 내용은 "구현 예정"이 아니라 **실제 동작 확인된 현재 상태** 기준입니다.
+> 8/11: 음성 안내(`/tts_request`) 실제 연결, 사람감지 CPU 최적화, `com_launch` 통합 launch 파일,
+> USB 시리얼 포트 udev 고정, `hmi_bridge_node`/`com_sensor_bridge_node` 크래시 버그 수정,
+> **`/initialpose` 레이스 문제 해결**(`set_initial_pose` 파라미터 방식). 다만 같은 날 실물 테스트로
+> **AMCL이 `map→odom` tf를 지속 갱신하지 못해 Nav2가 실제 이동 없이 "목표 도달"로 오판하는
+> 별도 버그를 새로 발견**(§12) — 8/6 기록된 "실주행 성공"은 실제 이동 시간·최종 위치 오차로
+> 검증된 것이라 유효하지만, **이 버그가 해결되기 전까지는 매번 실주행 여부를 직접 확인 없이
+> `/start_mission` 결과를 신뢰하면 안 됩니다.** 다음 세션 재개 절차는 바로 아래 참고.
+
+## 🔋 다음 세션 재개 절차 (2026-08-11 세션, 배터리 충전 후 이어서)
+
+1. **배터리 충전 확인** (12V 근처 권장, §8-1 참고):
+   ```bash
+   ssh com@192.168.210.15
+   source /opt/ros/humble/setup.bash && source ~/com_ws/install/setup.bash
+   ros2 topic echo /battery_state --once | grep -E "voltage|percentage"
+   ```
+2. **로봇을 충전 스테이션 앞 정렬점에 둔 상태인지 확인** — `nav2_params.yaml`의 `set_initial_pose` 좌표(도킹 지점 x=1.079, y=0.901)가 이 위치를 전제로 합니다. 다른 곳에 있다면 §8-2 "AMCL 상태 확인" 절차를 보기 전에 좌표부터 실제 위치로 갱신하세요.
+3. **기존 프로세스가 남아있으면 정리** (이 세션에서 노드를 개별적으로 많이 재시작해서 지저분한 상태일 수 있음):
+   ```bash
+   ps aux | grep -E "com_ws/install|turtlebot3_ros|component_container|camera_ros" | grep -v grep
+   # 나온 PID들을 개별적으로 kill (pkill -f 절대 쓰지 말 것! §11 참고)
+   ```
+   확실하지 않으면 그냥 `sudo reboot`로 재부팅하는 게 제일 깔끔합니다(오늘 세션에서도 이 방법으로 여러 문제가 정리됨).
+4. **전체 스택 기동**:
+   ```bash
+   source /opt/ros/humble/setup.bash
+   source ~/com_ws/install/setup.bash
+   export TURTLEBOT3_MODEL=burger
+   export LDS_MODEL=LDS-03
+   setsid nohup ros2 launch com_launch robot_all.launch.py > ~/com_launch.log 2>&1 < /dev/null &
+   disown
+   ```
+   20~30초 기다린 뒤 확인:
+   ```bash
+   grep -iE "died|Traceback" ~/com_launch.log | grep -v "No such device\|audio open error"
+   ```
+   아무것도 안 뜨면 정상. 뭔가 죽었으면(특히 `camera_node`가 "Device or resource busy"로 죽는 경우가 있었음 - 이전 세션에서 정리 안 된 프로세스가 카메라를 붙잡고 있을 때) 해당 노드만 개별적으로 재시작(§8-3~8-5 패턴 참고).
+5. **AMCL이 실제로 잘 도는지 확인 (§8-2 "AMCL 상태 확인" 필수 — 이거 안 하면 8/11에 발견된 "거짓 도착" 버그를 또 만날 수 있음)**:
+   ```bash
+   ros2 run tf2_ros tf2_echo map odom     # 계속 갱신되는지
+   ros2 topic hz /amcl_pose                # 계속 갱신되는지 (Ctrl+C로 종료)
+   ```
+   둘 다 멈추지 않고 계속 갱신되면 안전하게 `/start_mission` 테스트 진행. 멈춰있거나 몇십 초씩 안 갱신되면 §12의 "AMCL이 map→odom tf를 지속 갱신 못 함" 항목부터 다시 조사할 것 — **이 상태에서 주행 테스트하면 실제로 안 움직였는데 도착으로 오판할 수 있음.**
+6. **음성 안내가 필요하면 스피커 확인**: USB 오디오 동글(Jieli UACDemoV1.0)이 하드웨어적으로 불안정한 상태로 남아있습니다(§12). `aplay` 아무 wav나 재생해서 실제로 들리는지 먼저 확인하세요.
 
 TurtleBot3 Burger, ROS 2 Humble, Nav2, ArUco 마커를 이용한 실내 방문자 안내 로봇입니다. 로봇은 방문자를 지정 목적지(강의실1~5, 회의실, 인포, 상담실 = room1~room8)까지 자율주행으로 안내하고, 이동 중 온도·습도·불꽃을 측정하며, 임무 완료 후 **ArUco 마커 기반 정밀 도킹**으로 충전 스테이션에 자동 복귀합니다.
 
@@ -81,13 +121,13 @@ SYSTEM_INIT → LOCALIZING → READY → GUIDING → ARRIVED → RETURNING → D
 | OpenCR 보드 | 모터 제어 + IMU, `turtlebot3_node` 구동 | `/dev/ttyACM1` (STM32, ROBOTIS) |
 | 2D LiDAR (COIN D4) | 전방 장애물 감지 및 AMCL 위치추정 | `/dev/ttyUSB0` (CP210x) |
 | Raspberry Pi Camera (imx219) | ArUco 마커 인식·사람 감지 | CSI, `format:=RGB888` 필수(§12) |
-| 메인센서보드 (Arduino Uno) | DHT11(온습도)+불꽃+후방 초음파+조이스틱 | `/dev/ttyACM0`, 9600 baud |
-| TFT보드 (Arduino Uno) | 3.5인치 TFT 화면(ARS36125D/ILI9486)만 전담, 한글 UI | `/dev/ttyACM2`, 115200 baud |
+| 메인센서보드 (Arduino Uno) | DHT11(온습도)+불꽃+후방 초음파+조이스틱 | `/dev/com_sensorboard`(고정 심볼릭 링크), 9600 baud |
+| TFT보드 (Arduino Uno) | 3.5인치 TFT 화면(ARS36125D/ILI9486)만 전담, 한글 UI | `/dev/com_tftboard`(고정 심볼릭 링크), 115200 baud |
 | Raspberry Pi 4 | 온보드 컴퓨터 | 모든 ROS 2 노드 수동 기동(PM2 미사용) |
 | 충전 스테이션 | ArUco 마커(ID 29) 부착, 정밀 도킹 대상 | `waypoints.yaml`의 `docking` 웨이포인트 |
 | 관제 PC/노트북 | 개발/미러용 워크스페이스, `docs/`, docx 열람 등 | 로봇 핵심 기능과 무관 |
 
-> ⚠️ 포트 번호(`ttyACM0/1/2`, `ttyUSB0`)는 재부팅·재연결 시 바뀔 수 있습니다. 매번 `lsusb` + `udevadm info -q property -n /dev/ttyACMx`로 재확인하세요. Uno가 2개(메인센서보드/TFT보드)라 장치번호만으로는 구분 안 되고, 실제로 보내는 데이터(9600 baud 텔레메트리 vs 115200 baud `READY`)로 식별해야 합니다.
+> ✅ **(2026-08-11) 포트 번호 고정 완료.** `ttyACM0/1/2/3` 같은 커널 할당 번호는 여전히 재부팅·재연결 시 바뀌지만, `com_launch/udev/99-com-robot-serial.rules`(시리얼 번호 기반)를 `/etc/udev/rules.d/`에 설치해두면 `/dev/com_sensorboard`(메인센서보드), `/dev/com_tftboard`(TFT보드) 심볼릭 링크가 항상 올바른 장치를 가리킵니다(OpenCR `/dev/opencr`, 라이다 `/dev/tb3_lidar`는 TurtleBot3 표준 설치가 이미 처리). 새 라즈베리파이로 옮기면 규칙을 다시 설치해야 합니다: `sudo cp com_launch/udev/99-com-robot-serial.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger`. 이 규칙이 없는 환경이라면 여전히 매번 `lsusb` + `udevadm info -q property -n /dev/ttyACMx`로 재확인해야 합니다(Uno가 2개라 장치번호만으로는 구분 안 되고, 실제로 보내는 데이터(9600 baud 텔레메트리 vs 115200 baud `READY`)로 식별).
 
 ---
 
@@ -186,6 +226,14 @@ cd ~/com_ws
 git clone git@github.com:unitydt-ros2-class2-2026/com_main_project_01.git .
 ```
 
+**⑤ (2026-08-11 추가) 시리얼 포트 고정용 udev 규칙 설치**
+```bash
+sudo cp com_ws/src/com_launch/udev/99-com-robot-serial.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+안 하면 재부팅·재연결마다 `ttyACM` 번호가 바뀌어서 `hmi_bridge_node`가 엉뚱한(또는 존재하지 않는) 포트를 붙잡고 계속 I/O 에러를 내는 문제가 생깁니다(§3, §12 참고). 아두이노 보드를 교체하면 규칙 파일의 시리얼 번호도 다시 확인해서 갱신해야 합니다.
+
 > GUI/PM2 설치 단계는 삭제했습니다 — 둘 다 이 프로젝트에서 최종적으로 사용하지 않습니다(§12 참고).
 
 ---
@@ -228,7 +276,7 @@ ros2 pkg executables <패키지명>   # 실제 등록된 실행파일 확인
 > export LDS_MODEL=LDS-03
 > ros2 launch com_launch robot_all.launch.py
 > ```
-> `hmi_serial_port`(기본 `/dev/ttyACM2`), `sensor_serial_port`(기본 `/dev/ttyACM0`) 등 인자로 포트를 오버라이드할 수 있습니다. 전체 인자 목록은 `ros2 launch com_launch robot_all.launch.py --show-args`. SSH 세션 종료 후에도 살려두려면 §11의 `setsid nohup ... &` 패턴을 그대로 쓰세요. 아래 8-1~8-5는 개별 노드를 따로 띄우거나 디버깅할 때 참고하세요.
+> `hmi_serial_port`(기본 `/dev/com_tftboard`), `sensor_serial_port`(기본 `/dev/com_sensorboard`, 둘 다 udev 고정 심볼릭 링크) 등 인자로 포트를 오버라이드할 수 있습니다. 전체 인자 목록은 `ros2 launch com_launch robot_all.launch.py --show-args`. SSH 세션 종료 후에도 살려두려면 §11의 `setsid nohup ... &` 패턴을 그대로 쓰세요. 아래 8-1~8-5는 개별 노드를 따로 띄우거나 디버깅할 때 참고하세요.
 
 ### 8-1. 베이스 + 라이다 + OpenCR
 
@@ -251,7 +299,24 @@ ros2 launch com_bringup navigation.launch.py
 ```
 기본 파라미터 파일은 `com_navigation/config/nav2_params.yaml`(Pi4 CPU에 맞게 튜닝됨)입니다. 원래 turtlebot3_navigation2 기본값으로 띄우고 싶으면 `params_file:=` 인자로 오버라이드하세요.
 
-**초기 위치 설정 (AMCL)** — 로봇이 지도 상 어디 있는지 알려줘야 합니다:
+**초기 위치 설정 (AMCL)** — 로봇이 지도 상 어디 있는지 알려줘야 합니다.
+
+> ✅ **(2026-08-11) 권장 방법: `nav2_params.yaml`에 미리 박아두기.** `/initialpose` 토픽으로 런타임에 주는 방식은 AMCL이 메시지 stamp가 아니라 자기 `now()`로 tf를 조회해서 `/odom`이 조금만 뒤처져도(항상 그럼) `Failed to transform initial pose in time`으로 거부하는 고질적인 문제가 있습니다(§12 참고). 대신 `com_navigation/config/nav2_params.yaml`의 `amcl:` 섹션에 아래처럼 박아두면 Nav2 기동 시점에 바로 적용되어 이 문제를 피합니다:
+> ```yaml
+> amcl:
+>   ros__parameters:
+>     set_initial_pose: true
+>     initial_pose:
+>       x: <로봇의 실제 시작 x>
+>       y: <로봇의 실제 시작 y>
+>       z: 0.0
+>       yaw: <로봇의 실제 시작 방향, 라디안>
+> ```
+> **로봇을 옮겨서 다시 기동할 때마다 이 좌표를 실제 위치로 갱신해야 합니다** — 안 그러면 AMCL이 엉뚱한 위치를 "확신"한 채로 시작합니다. 정상 운영 시 로봇은 항상 충전 스테이션 앞(`waypoints.yaml`의 `docking` 웨이포인트, 현재 x=1.079, y=0.901)에서 시작하는 게 기본 전제이므로, 특별한 사정이 없으면 이 좌표를 기본값으로 유지하세요.
+>
+> 파일을 고친 뒤에는 반드시 다시 빌드하고(`colcon build --symlink-install --packages-select com_navigation`) Nav2를 재기동해야 반영됩니다.
+
+기존 토픽 방식(레이스 컨디션 있음, 잘 안 먹힐 수 있음)은 그래도 참고용으로 남겨둡니다:
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /initialpose \
   geometry_msgs/msg/PoseWithCovarianceStamped \
@@ -259,9 +324,18 @@ ros2 topic pub --once --qos-reliability best_effort /initialpose \
   orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}, \
   covariance: [0.25,0,0,0,0,0, 0,0.25,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0.0685]}}"
 ```
-> ⚠️ AMCL의 `/initialpose` 구독은 **BEST_EFFORT** QoS입니다. `--qos-reliability best_effort`를 빼먹으면 "publisher: beginning loop"까지는 뜨는데 AMCL이 영원히 못 받습니다(경고 로그만 반복). 한 번에 안 먹히면 `-r 2`로 잠깐(2~4초) 반복 발행하세요.
->
-> ⚠️ **(2026-08-11 추가) 그래도 계속 `Failed to transform initial pose in time (extrapolation into the future)`로 거부될 수 있습니다.** `/odom`이 평균 20Hz(최대 81.5ms 간격)로만 발행되는 게 원인으로 추정됩니다 — 근본 해결 전까지는 §12 참고.
+> ⚠️ AMCL의 `/initialpose` 구독은 **BEST_EFFORT** QoS입니다. `--qos-reliability best_effort`를 빼먹으면 "publisher: beginning loop"까지는 뜨는데 AMCL이 영원히 못 받습니다(경고 로그만 반복). 한 번에 안 먹혀도(대부분 안 먹힙니다) 위 파라미터 방식을 쓰세요.
+
+> ⚠️ **(2026-08-11) 초기위치가 잡혀도 안심 금물 — Nav2가 실제 이동 없이 "목표 도달"로 오판하는 별도 버그가 있습니다.** `/start_mission` 실행 전 반드시 아래 "AMCL 상태 확인" 절차로 `map→odom` tf가 실시간으로 갱신되고 있는지 먼저 확인하세요. §12 참고.
+
+**AMCL 상태 확인 (주행 시도 전 필수, 2026-08-11 추가)**
+```bash
+# map->odom tf가 몇 초 이내로 계속 갱신되는지 확인 (오래 멈춰있으면 위험 신호)
+ros2 run tf2_ros tf2_echo map odom
+# amcl_pose가 계속 갱신되는지도 확인 (한 번 찍고 멈추면 안 됨)
+ros2 topic hz /amcl_pose
+```
+둘 다 몇 초 이내 간격으로 계속 갱신되는 걸 확인한 뒤에만 `/start_mission`을 호출하세요. 정지해 있거나 몇십 초씩 안 갱신되면 실제로는 안 움직였는데 목표 도달로 잘못 처리될 수 있습니다(§12).
 
 ### 8-3. 비전 (카메라 + ArUco)
 
@@ -277,10 +351,10 @@ ros2 launch com_vision aruco.launch.py
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/com_ws/install/setup.bash
-ros2 run com_sensors com_sensor_bridge_node                                    # 메인센서보드, 기본 /dev/ttyACM0
-ros2 run com_sensors hmi_bridge_node --ros-args -p serial_port:=/dev/ttyACM2   # TFT보드, 반드시 포트 오버라이드
+ros2 run com_sensors com_sensor_bridge_node    # 메인센서보드, 기본 /dev/com_sensorboard(udev 고정 링크)
+ros2 run com_sensors hmi_bridge_node           # TFT보드, 기본 /dev/com_tftboard(udev 고정 링크)
 ```
-`hmi_bridge_node`의 `serial_port` 기본값은 `/dev/ttyACM0`(메인센서보드와 겹침)이므로 **반드시 `/dev/ttyACM2`로 오버라이드**해야 합니다.
+`99-com-robot-serial.rules`가 설치돼 있으면(§3 참고) 포트 오버라이드 없이 그대로 실행하면 됩니다. 규칙이 없는 새 환경이라면 `--ros-args -p serial_port:=/dev/ttyACMx`로 실제 포트를 확인해서 오버라이드하세요.
 
 ### 8-5. 임무 상태머신 + 상태 종합 + 음성
 
@@ -371,8 +445,10 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 
 | 문제 | 영향 | 상태 |
 |---|---|---|
-| **`/initialpose`가 계속 거부됨** — `Failed to transform initial pose in time (extrapolation into the future)`, 요청 시각이 최신 tf보다 매번 35~75ms 앞섬 | AMCL이 map→odom을 못 잡아 `/start_mission` 기반 실제 주행 테스트가 막힘 | 2026-08-11 재조사: `/odom` 발행 주기가 평균 20Hz(최대 81.5ms 간격)로 측정됨 - 이게 근본 원인일 가능성이 높음(기존엔 "CPU 경합"으로 추정했었음). 사람감지 CPU 최적화(아래 항목)만으로는 해결 안 됨을 확인. 다음: `diff_drive_controller` odom 발행 주기 확인, 또는 RViz "2D Pose Estimate"로 재시도 필요 |
-| Nav2 + 비전(카메라+ArUco+사람감지)을 Pi4 한 대에서 동시 구동 시 CPU 부하(load average 5~7대, 4코어 기준)로 `/tf`·`/scan`이 간헐적으로 끊김 | 주행 중 정지·타임아웃 가능성 | `nav2_params.yaml` 튜닝(load 6~7→1.5~3) + 2026-08-11 사람감지 주기 분리·단일스레드화(`aruco_node` CPU 67.5%→52%)로 완화. 다만 위 `/initialpose` 문제는 별개 원인일 가능성이 높아 이 최적화만으로는 안 풀림 - 완전 해결 아님 |
+| ~~`/initialpose`가 계속 거부됨~~ (해결) | ~~AMCL이 map→odom을 못 잡아 실제 주행 테스트가 막힘~~ | **2026-08-11 해결.** 원인: AMCL이 `/initialpose` 메시지 처리 시 메시지의 `header.stamp`가 아니라 자기 `now()` 기준으로 tf lookup을 해서, `/odom`이 조금이라도 뒤처져 있으면(항상 그럼) `Failed to transform initial pose in time`으로 거부 - 토픽 기반으로는 구조적으로 이 레이스를 못 피함. **해결책: `nav2_params.yaml`의 amcl 섹션에 `set_initial_pose: true` + `initial_pose.x/y/z/yaw`를 박아서 AMCL 시작 시점에 파라미터로 위치를 줌** - 토픽을 아예 안 타서 레이스 자체가 안 생김. 실측: 재시작 즉시 `Setting pose` 성공, `/amcl_pose` 정상 발행 확인. §8-2 참고. **주의: 현재 좌표는 8/11 테스트 시점 로봇의 실제 위치(1강의실 앞) 기준 임시값 - 운영 시 도킹 지점 좌표로 되돌리거나 매번 실제 시작 위치에 맞게 갱신 필요.** |
+| **(신규, 미해결) AMCL이 `map→odom` tf를 지속 갱신 못 함 → Nav2가 실제 이동 없이 "목표 도달"로 오판** | `/start_mission`이 실제로는 로봇이 전혀 안 움직였는데 몇백ms 만에 GUIDING→ARRIVED로 넘어감(2026-08-11 조이스틱 실주행 테스트로 실측, 6m 목적지가 0.65초 만에 "도착" 처리됨) - **주행 로직 전체가 실제로는 검증 안 된 것과 같음** | 로그에 `[tf_help] Transform data too old when converting from map to odom`(수십 초 차이) 직후 `controller_server: Reached the goal!`가 뜸 - AMCL이 초기 위치는 잡지만 이후 `map→odom` tf를 실시간으로 못 갱신하고(스캔 처리 적체로 추정, `Message Filter dropping message... queue is full` 경고 반복 관찰) 오래된 tf 때문에 컨트롤러가 목표까지 거리 계산에 실패 → 거짓 성공으로 처리되는 것으로 보임. 사람감지 A/B 테스트로 CPU/사람감지와 무관함은 확정됐으나 근본 원인(AMCL 처리 적체 자체의 원인)은 미확정. **다음 세션 최우선 과제** - `amcl_pose`/`tf`가 스캔 주기(라이다 10Hz)만큼 계속 갱신되는지 실측 확인부터 시작할 것 |
+| Nav2 + 비전(카메라+ArUco+사람감지)을 Pi4 한 대에서 동시 구동 시 CPU 부하(load average 5대, 4코어 기준)로 `/tf`·`/scan`이 간헐적으로 끊김 | 주행 중 정지·타임아웃 가능성 | `nav2_params.yaml` 튜닝 + 2026-08-11 사람감지 주기 분리·단일스레드화(`aruco_node` CPU 67.5%→52%)로 완화(완전 해결 아님). 단, 위 `/initialpose` 문제와는 무관함이 확정됨(A/B 테스트 참고) |
+| USB 시리얼 장치(메인센서보드/TFT보드/OpenCR/오디오)가 간헐적으로 재연결됨 | 예전엔 이때 `hmi_bridge_node`/`com_sensor_bridge_node`가 예외처리 없이 그대로 죽었음(수동 재시작 전까지 HMI 화면·조이스틱·센서값 전부 먹통) | 2026-08-11: 두 노드 모두 시리얼 read/write를 `OSError` try/except로 감싸서 죽지 않고 재시도하도록 수정. 포트 번호 자체가 바뀌는 문제는 udev 규칙으로 별도 해결(§3, §6-⑤). USB 오디오 동글(스피커)은 여전히 하드웨어 자체가 불안정 - 별도 조치 필요(다른 포트/케이블/동글 교체) |
 | 물리 긴급정지 버튼 없음 | 긴급정지 기능이 현재 시스템에 아예 없음 | GUI 버튼으로 대체 예정, `com_gui` 미구현이라 보류 |
 | `/env_data` 발행자 없음 | 측정 로그 조회가 항상 빈 결과 | 미착수 (온습도+waypoint_id를 묶는 다리 노드 필요) |
 | `WaypointSequencer`의 `trajectory_1`/`trajectory_2` 경유점 시퀀스 미정의 | 출발지→목적지, 목적지→도킹이 경유점 없이 직행(Nav2 자체 경로계획에 의존) | 설계상 문제는 아니나 문서(SR-006)와는 다름 |
