@@ -1,7 +1,10 @@
 # TurtleBot3 기반 방문자 안내 로봇 (COM팀)
 
-> **최종 업데이트: 2026-08-06** — 실제 자율주행 성공(GUIDING→ARRIVED→RETURNING까지 실측 완료),
+> **최종 업데이트: 2026-08-11** — 실제 자율주행 성공(GUIDING→ARRIVED→RETURNING까지 실측 완료),
 > 도킹은 정렬 단계 재검증 필요. 아래 내용은 "구현 예정"이 아니라 **실제 동작 확인된 현재 상태** 기준입니다.
+> 8/11: 음성 안내(`/tts_request`) 실제 연결 완료(더 이상 무음 아님), 사람감지 CPU 최적화,
+> `com_launch`에 전체 노드 통합 launch 파일 추가. 단, `/initialpose`가 계속 거부되는 문제를
+> 새로 발견해 실제 주행 재검증은 막혀 있음(§12 참고).
 
 TurtleBot3 Burger, ROS 2 Humble, Nav2, ArUco 마커를 이용한 실내 방문자 안내 로봇입니다. 로봇은 방문자를 지정 목적지(강의실1~5, 회의실, 인포, 상담실 = room1~room8)까지 자율주행으로 안내하고, 이동 중 온도·습도·불꽃을 측정하며, 임무 완료 후 **ArUco 마커 기반 정밀 도킹**으로 충전 스테이션에 자동 복귀합니다.
 
@@ -37,18 +40,18 @@ TurtleBot3 Burger, ROS 2 Humble, Nav2, ArUco 마커를 이용한 실내 방문�
 
 **구현 및 실측 완료**
 - Nav2 기반 자율주행으로 목적지(room1~room8) 안내 — **2026-08-06 실제 주행 성공** (`/start_mission` → 실제 도착 확인, 좌표 오차 3.6cm)
-- ArUco 마커 인식 + 사람 감지(HOG) — 구현 완료, Pi4에서 Nav2와 동시 구동 시 CPU 여유가 빠듯함(§12 참고)
+- ArUco 마커 인식 + 사람 감지(HOG) — 구현 완료. 2026-08-11에 사람감지 주기를 마커 검출(5Hz)과 분리(기본 1Hz)해 CPU 사용량 약 23% 절감(67.5%→52%, `aruco_node` 단독 기준). 다만 Pi4에서 Nav2와 동시 구동 시 여전히 여유가 빠듯함(§12 참고)
 - **ARRIVED → RETURNING → DOCKING → DOCKED → READY 자동 사이클** — 2026-08-06 구현·부분 검증(복귀 주행까지 실측 성공, 도킹 정렬은 재검증 필요)
 - **PERSON_WAIT**(사람 감지 시 정지·대기) — 2026-08-06 구현(OBSTACLE_STOP과 동일 패턴), 실물 검증 예정
 - 후방 초음파 장애물 감지(OBSTACLE_STOP) — 2026-08-06 배선 오류 발견·수정(그 전까지는 실제로 동작한 적이 없었음), 실물 검증 예정
 - HMI: TFT 화면 보드 + 조이스틱 메인센서보드 2보드 구성, 한글 UI — 실물 검증 완료
-- 음성 안내(`voice_node`) — 노드는 동작하나 `/tts_request`를 발행하는 코드가 없어 실제로는 무음 (§12)
+- 음성 안내(`voice_node`) — 2026-08-11에 `service_manager_node`가 주요 상태 전이(안내 시작/도착/복귀/취소/장애물/사람대기 등) 시점에 `/tts_request`를 실제로 발행하도록 연결 완료, 더 이상 무음 아님. 재생 문구는 gTTS로 생성(`com_service/scripts/generate_audio.py`, 재실행하면 재생성 가능). 연달아 겹쳐 재생 요청되면 이전 재생이 끝날 때까지 큐잉 후 순차 재생(이전엔 ALSA 충돌로 뒤 안내가 씹히는 버그가 있었음, 수정 완료)
 - PyQt 관제 GUI(`com_gui`) — **미구현** (빈 스켈레톤). 목적지 선택은 로봇에 탑재된 TFT+조이스틱으로 함
 
 **미구현**
 - 물리 긴급정지 버튼 — 없음. GUI 버튼으로 대체 예정이나 GUI 자체가 미구현이라 긴급정지 기능이 현재 시스템에 없음
 - `/env_data` 발행자 없음 — 측정 로그 조회(`/get_measurement_log`)는 항상 빈 결과 반환
-- PM2 프로세스 관리 — 도입 안 함. 모든 노드는 SSH로 수동 실행(§8)
+- PM2 프로세스 관리 — 도입 안 함. `com_launch/robot_all.launch.py`(2026-08-11)로 한 번에 기동할 수는 있지만 비정상 종료 시 자동 재시작은 없음(§8, §12)
 
 ---
 
@@ -99,7 +102,7 @@ SYSTEM_INIT → LOCALIZING → READY → GUIDING → ARRIVED → RETURNING → D
 | 비전 | OpenCV + ArUco 모듈 (`DICT_4X4_50`) |
 | GUI | PyQt5 — **미구현** |
 | 프로세스 관리 | 없음(PM2 도입 안 함) — 전부 수동 `ros2 run`/`ros2 launch` |
-| 음성 | 로컬 wav 재생(`aplay`) — `/tts_request` 발행자가 없어 현재 무음 |
+| 음성 | 로컬 wav 재생(`aplay`), 문구는 gTTS로 사전 생성 — `service_manager_node`가 `/tts_request` 발행 (2026-08-11 연결) |
 | 하드웨어 브릿지 | pyserial 기반 시리얼 통신 (com_sensors 패키지) |
 
 ---
@@ -117,13 +120,17 @@ com_ws/
     │                     #   ├─ serial_bridge_node.py : 메인센서보드(DHT11+불꽃+초음파+조이스틱), 엔트리포인트 com_sensor_bridge_node
     │                     #   └─ hmi_bridge_node.py     : TFT보드 브릿지(화면 전환, 배터리/WiFi 표시, 조이스틱 릴레이)
     ├── com_vision/       # camera + aruco 인식·정밀도킹 오차계산·사람감지, 실물 검증 완료
-    │                     #   └─ aruco_node.py : /mission_state 구독해 DOCKING 중엔 사람감지 스킵(CPU 최적화)
+    │                     #   └─ aruco_node.py : /mission_state 구독해 DOCKING 중엔 사람감지 스킵(CPU 최적화),
+    │                     #                       사람감지는 detection_rate(마커, 5Hz)와 분리된
+    │                     #                       person_detection_rate(기본 1Hz)로 실행(2026-08-11)
     ├── com_gui/          # 빈 스켈레톤 (미구현) — 목적지 선택은 TFT+조이스틱으로 대체
-    ├── com_launch/       # 빈 스켈레톤 (미구현, PM2 관련 계획 폐기)
+    ├── com_launch/       # launch/robot_all.launch.py : §8의 8단계를 하나의 ros2 launch로 통합(2026-08-11)
     ├── com_service/      # 임무 상태머신 + 음성
     │                     #   ├─ mission_state.py       : 상태 14종 정의
-    │                     #   ├─ service_manager_node.py: 상태머신, WaypointSequencer, DockingController, SafetyMonitor
-    │                     #   └─ voice_node.py          : /tts_request 구독 → aplay 재생 (발행자 없어 현재 미사용)
+    │                     #   ├─ service_manager_node.py: 상태머신, WaypointSequencer, DockingController, SafetyMonitor,
+    │                     #   │                            주요 상태 전이 시 /tts_request 발행
+    │                     #   ├─ voice_node.py          : /tts_request 구독 → aplay 순차 재생(큐잉)
+    │                     #   └─ scripts/generate_audio.py : gTTS로 audio/*.wav 재생성(개발용, 로봇에서 실행 불필요)
     ├── com_status/       # status_node.py : /robot_state, /mission_state, /current_waypoint_id 발행, 측정 로그 서비스
     └── coin_d4_driver/   # LiDAR(COIN D4) 서드파티 드라이버 (별도 git 서브트리)
 ```
@@ -213,6 +220,16 @@ ros2 pkg executables <패키지명>   # 실제 등록된 실행파일 확인
 
 로봇(`192.168.210.15`)에 SSH로 접속한 뒤, **아래 순서대로** 별도 터미널(또는 백그라운드, §11 참고)에서 실행합니다.
 
+> **통합 launch(2026-08-11 추가)**: 아래 8-1~8-5를 8개 SSH 터미널로 나눠 실행하는 대신, `com_launch` 패키지의 `robot_all.launch.py` 하나로 한 번에 띄울 수 있습니다.
+> ```bash
+> source /opt/ros/humble/setup.bash
+> source ~/com_ws/install/setup.bash
+> export TURTLEBOT3_MODEL=burger
+> export LDS_MODEL=LDS-03
+> ros2 launch com_launch robot_all.launch.py
+> ```
+> `hmi_serial_port`(기본 `/dev/ttyACM2`), `sensor_serial_port`(기본 `/dev/ttyACM0`) 등 인자로 포트를 오버라이드할 수 있습니다. 전체 인자 목록은 `ros2 launch com_launch robot_all.launch.py --show-args`. SSH 세션 종료 후에도 살려두려면 §11의 `setsid nohup ... &` 패턴을 그대로 쓰세요. 아래 8-1~8-5는 개별 노드를 따로 띄우거나 디버깅할 때 참고하세요.
+
 ### 8-1. 베이스 + 라이다 + OpenCR
 
 ```bash
@@ -243,6 +260,8 @@ ros2 topic pub --once --qos-reliability best_effort /initialpose \
   covariance: [0.25,0,0,0,0,0, 0,0.25,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0.0685]}}"
 ```
 > ⚠️ AMCL의 `/initialpose` 구독은 **BEST_EFFORT** QoS입니다. `--qos-reliability best_effort`를 빼먹으면 "publisher: beginning loop"까지는 뜨는데 AMCL이 영원히 못 받습니다(경고 로그만 반복). 한 번에 안 먹히면 `-r 2`로 잠깐(2~4초) 반복 발행하세요.
+>
+> ⚠️ **(2026-08-11 추가) 그래도 계속 `Failed to transform initial pose in time (extrapolation into the future)`로 거부될 수 있습니다.** `/odom`이 평균 20Hz(최대 81.5ms 간격)로만 발행되는 게 원인으로 추정됩니다 — 근본 해결 전까지는 §12 참고.
 
 ### 8-3. 비전 (카메라 + ArUco)
 
@@ -310,6 +329,7 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 | Topic | `/battery_percent` | std_msgs/Float32 | 1Hz |
 | Topic | `/robot_state` | com_interfaces/RobotState | status 노드, 2Hz |
 | Topic | `/battery_state` | sensor_msgs/BatteryState | OpenCR(`turtlebot3_node`) 발행, service_manager가 직접 구독 |
+| Topic | `/tts_request` | com_interfaces/TtsRequest | `service_manager`가 주요 상태 전이 시 발행 → `voice_node`가 구독해 재생 (2026-08-11 연결) |
 | Service | `/start_mission` | com_interfaces/StartMission | destination_id: room1~room8 |
 | Service | `/cancel_mission` | std_srvs/Trigger | READY로 직접 복귀 |
 | Service | `/get_measurement_log` | com_interfaces/GetMeasurementLog | `/env_data` 발행자가 없어 **항상 빈 결과** |
@@ -321,7 +341,6 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 |---|---|
 | `/button_event` | 물리 긴급정지 버튼이 실제로 없음. GUI 버튼 도입 시 재사용 예정 |
 | `/env_data` | 온습도 데이터를 waypoint_id와 묶어 재발행하는 다리 노드가 없음 |
-| `/tts_request` | `service_manager`가 상태 전이 시 이걸 발행하는 코드가 없음(voice_node는 떠 있지만 무음) |
 
 전체 커스텀 msg/srv 정의는 `com_interfaces/msg/`, `com_interfaces/srv/`를 참고하세요.
 
@@ -352,13 +371,13 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 
 | 문제 | 영향 | 상태 |
 |---|---|---|
-| Nav2 + 비전(카메라+ArUco+사람감지)을 Pi4 한 대에서 동시 구동 시 CPU 부하(load average 5~7대, 4코어 기준)로 `/tf`·`/scan`이 간헐적으로 끊김 | 주행 중 정지·타임아웃 가능성 | `nav2_params.yaml` 튜닝으로 완화(load 6~7→1.5~3), 사람감지까지 같이 켜면 여전히 부하 있음 - 완전 해결 아님 |
+| **`/initialpose`가 계속 거부됨** — `Failed to transform initial pose in time (extrapolation into the future)`, 요청 시각이 최신 tf보다 매번 35~75ms 앞섬 | AMCL이 map→odom을 못 잡아 `/start_mission` 기반 실제 주행 테스트가 막힘 | 2026-08-11 재조사: `/odom` 발행 주기가 평균 20Hz(최대 81.5ms 간격)로 측정됨 - 이게 근본 원인일 가능성이 높음(기존엔 "CPU 경합"으로 추정했었음). 사람감지 CPU 최적화(아래 항목)만으로는 해결 안 됨을 확인. 다음: `diff_drive_controller` odom 발행 주기 확인, 또는 RViz "2D Pose Estimate"로 재시도 필요 |
+| Nav2 + 비전(카메라+ArUco+사람감지)을 Pi4 한 대에서 동시 구동 시 CPU 부하(load average 5~7대, 4코어 기준)로 `/tf`·`/scan`이 간헐적으로 끊김 | 주행 중 정지·타임아웃 가능성 | `nav2_params.yaml` 튜닝(load 6~7→1.5~3) + 2026-08-11 사람감지 주기 분리·단일스레드화(`aruco_node` CPU 67.5%→52%)로 완화. 다만 위 `/initialpose` 문제는 별개 원인일 가능성이 높아 이 최적화만으로는 안 풀림 - 완전 해결 아님 |
 | 물리 긴급정지 버튼 없음 | 긴급정지 기능이 현재 시스템에 아예 없음 | GUI 버튼으로 대체 예정, `com_gui` 미구현이라 보류 |
 | `/env_data` 발행자 없음 | 측정 로그 조회가 항상 빈 결과 | 미착수 (온습도+waypoint_id를 묶는 다리 노드 필요) |
-| `/tts_request` 발행자 없음 | 음성 안내가 실제로는 무음 | 미착수 |
 | `WaypointSequencer`의 `trajectory_1`/`trajectory_2` 경유점 시퀀스 미정의 | 출발지→목적지, 목적지→도킹이 경유점 없이 직행(Nav2 자체 경로계획에 의존) | 설계상 문제는 아니나 문서(SR-006)와는 다름 |
 | ArUco 도킹 정렬 신뢰성 | 다중 마커 동시 검출 시 잘못된 마커를 보고하던 버그는 수정(2026-08-06)했으나 실물 재검증 필요 | 다음 세션에서 재시도 필요 |
-| PM2 미도입 | 노드 비정상 종료 시 자동 재시작 없음 | 수동 운영으로 대체, 재도입 여부 미정 |
+| PM2 미도입 | 노드 비정상 종료 시 자동 재시작 없음 | 수동 운영으로 대체, `com_launch/robot_all.launch.py`(2026-08-11)로 8개 노드 그룹을 한 번에 기동하는 것까지는 가능해졌으나 자동 재시작 기능은 아님 |
 | libcamera 0.1(vc4 파이프라인)에서 `orientation` 파라미터 미지원 | 카메라 프레임이 상하 반전되어 들어옴 | `aruco_node.py`에서 `cv2.rotate(frame, cv2.ROTATE_180)`로 코드에서 보정 처리 완료 |
 | `coin_d4_driver` 전체 빌드 시 간헐적 Aborted | 통합 빌드 시간 지연 가능 | 미해결, 재확인 필요 |
 
@@ -370,7 +389,7 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 |---|---|
 | 서류작성 (문서 7종 + 발표 PPT) | 인터페이스: HMI(TFT+조이스틱), 목적지 메뉴 UI |
 | 환경 세팅, bringup + camera(OpenCV 캘리브레이션) | Nav2·SLAM 준비, 하드웨어 조립, 실공간 SLAM 매핑 |
-| voice(음성 안내, `/tts_request` 배선은 미완) | aruco(마커 인식·정밀 도킹 오차 계산·사람 감지) |
+| voice(음성 안내, `/tts_request` 배선 2026-08-11 완료) | aruco(마커 인식·정밀 도킹 오차 계산·사람 감지) |
 | **service_manager**(상태머신, ArUco 정밀 도킹 로직) — 핵심 신규 기술 | sensor_bridge, status(배터리 %, 측정 로그, 상태 발행) |
 
 **공동 작업**
