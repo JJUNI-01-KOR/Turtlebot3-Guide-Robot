@@ -39,6 +39,7 @@ from std_msgs.msg import UInt8, Float32, Int32, Bool
 import serial
 
 from com_interfaces.srv import StartMission
+from com_interfaces.msg import TtsRequest
 
 MOVING_STATE_CODE = 0x03
 ARRIVED_STATE_CODE = 0x04
@@ -60,7 +61,11 @@ class HmiBridgeNode(Node):
     def __init__(self):
         super().__init__('com_hmi_bridge_node')
 
-        self.declare_parameter('serial_port', '/dev/ttyACM0')
+        # 2026-08-11: udev 규칙(99-com-robot-serial.rules)으로 시리얼 번호 기반 고정
+        # 심볼릭 링크를 만들어서 ttyACM 번호가 재부팅/재연결 때마다 바뀌는 문제를
+        # 회피함 - 예전엔 기본값이 메인센서보드와 겹쳐서 반드시 오버라이드해야 했지만,
+        # 이제 기본값 자체가 항상 TFT보드를 가리켜서 오버라이드 불필요.
+        self.declare_parameter('serial_port', '/dev/com_tftboard')
         self.declare_parameter('baud_rate', 115200)
 
         port = self.get_parameter('serial_port').get_parameter_value().string_value
@@ -76,6 +81,10 @@ class HmiBridgeNode(Node):
         self.last_state_code = None
         self.last_sent_battery = None
         self.last_sent_wifi = None
+        # WiFi 끊김(2026-08-11) - 연결->끊김 전이 시점에만 1회 안내(재연결 시 다시
+        # 끊기면 또 안내되도록 플래그 리셋). SDD-001 5장 표에 "재연결" 문구는 없어서
+        # 재연결 자체는 안내하지 않음(기존 설계 범위 그대로).
+        self.wifi_disconnected_announced = False
 
         self.latest_joy_x = 512  # 중앙값 기본값 (아직 값 안 받았을 때 이동 안 하도록)
         self.last_joy_button = False
@@ -98,6 +107,7 @@ class HmiBridgeNode(Node):
         self.joystick_button_sub = self.create_subscription(
             Bool, '/com_sensors/joystick_button', self.on_joystick_button, sensor_qos
         )
+        self.tts_request_pub = self.create_publisher(TtsRequest, '/tts_request', 10)
 
         self.timer = self.create_timer(0.02, self.read_serial_callback)
         self.wifi_timer = self.create_timer(5.0, self.on_wifi_timer)
@@ -105,13 +115,23 @@ class HmiBridgeNode(Node):
 
     # ---------- 보드 -> Pi ----------
     def read_serial_callback(self):
-        if self.ser.in_waiting == 0:
-            return
-
+        # 2026-08-11 실측: USB 연결이 간헐적으로 끊기면 pyserial이 OSError(Input/output
+        # error)를 던지는데, 예외 처리가 없어서 이 콜백(20ms 주기) 안에서 그대로
+        # rclpy executor까지 전파되어 노드 전체가 죽었었다(실물 세션 중 크래시 실측,
+        # HMI 화면/조이스틱이 수동 재시작 전까지 완전히 먹통이 됨). 안 죽고 다음
+        # 주기에 다시 시도하도록 방어.
         try:
+            if self.ser.in_waiting == 0:
+                return
             line = self.ser.readline().decode('utf-8').strip()
         except UnicodeDecodeError:
             self.get_logger().warn('HMI 보드 시리얼 데이터 디코딩 실패, 무시함')
+            return
+        except OSError as e:
+            self.get_logger().error(
+                f'HMI 보드 시리얼 읽기 실패: {e} (USB 연결 확인 필요, 다음 주기에 재시도)',
+                throttle_duration_sec=5.0
+            )
             return
 
         if not line:
@@ -159,7 +179,7 @@ class HmiBridgeNode(Node):
             now = time.monotonic()
             if now - self.last_confirm_time > JOY_CONFIRM_DEBOUNCE_S:
                 self.last_confirm_time = now
-                self.ser.write(b'CONFIRM\n')
+                self._write(b'CONFIRM\n')
         self.last_joy_button = pressed
 
     def on_joystick_move_timer(self):
@@ -170,10 +190,10 @@ class HmiBridgeNode(Node):
         # 반대로 맞춤 - x가 작을 때 DOWN, 클 때 UP.
         x = self.latest_joy_x
         if x < JOY_X_LOW_THRESHOLD:
-            self.ser.write(b'MOVE:DOWN\n')
+            self._write(b'MOVE:DOWN\n')
             self.last_move_time = now
         elif x > JOY_X_HIGH_THRESHOLD:
-            self.ser.write(b'MOVE:UP\n')
+            self._write(b'MOVE:UP\n')
             self.last_move_time = now
 
     # ---------- Pi -> 보드 ----------
@@ -183,14 +203,14 @@ class HmiBridgeNode(Node):
         self.last_state_code = msg.data
 
         if msg.data == MOVING_STATE_CODE:
-            self.ser.write(b'S:MOVING\n')
+            self._write(b'S:MOVING\n')
             self.get_logger().info('state_code=0x03 -> 보드에 S:MOVING 전송')
         elif msg.data == ARRIVED_STATE_CODE:
-            self.ser.write(b'S:ARRIVED\n')
+            self._write(b'S:ARRIVED\n')
             self.get_logger().info('state_code=0x04 -> 보드에 S:ARRIVED 전송')
         elif msg.data == ERROR_STATE_CODE:
             # 예전엔 이 분기가 없어서 ERROR 진입 시 보드 화면이 MOVING(눈)에 멈춰있었음
-            self.ser.write(b'S:SELECT\n')
+            self._write(b'S:SELECT\n')
             self.get_logger().info('state_code=0x0A(ERROR) -> 보드에 S:SELECT 전송, 메뉴로 복귀')
 
     def on_battery_percent(self, msg: Float32):
@@ -198,16 +218,28 @@ class HmiBridgeNode(Node):
         if percent == self.last_sent_battery:
             return
         self.last_sent_battery = percent
-        self.ser.write(f'B:{percent}\n'.encode('utf-8'))
+        self._write(f'B:{percent}\n'.encode('utf-8'))
         self.get_logger().info(f'battery_percent={msg.data:.1f} -> 보드에 B:{percent} 전송')
 
     def on_wifi_timer(self):
         bars = self.read_wifi_bars()
+        self.check_wifi_disconnected(bars)
+
         if bars is None or bars == self.last_sent_wifi:
             return
         self.last_sent_wifi = bars
-        self.ser.write(f'W:{bars}\n'.encode('utf-8'))
+        self._write(f'W:{bars}\n'.encode('utf-8'))
         self.get_logger().info(f'wifi link quality -> 보드에 W:{bars} 전송')
+
+    def check_wifi_disconnected(self, bars):
+        # bars=None(인터페이스 자체를 못 읽음) 또는 0(신호 없음) 둘 다 끊김으로 취급.
+        disconnected = bars is None or bars == 0
+        if disconnected and not self.wifi_disconnected_announced:
+            self.wifi_disconnected_announced = True
+            self.get_logger().warn('WiFi 연결 끊김 감지 -> /tts_request(wifi_disconnected) 발행')
+            self.tts_request_pub.publish(TtsRequest(text_key='wifi_disconnected'))
+        elif not disconnected:
+            self.wifi_disconnected_announced = False
 
     def read_wifi_bars(self):
         """/proc/net/wireless 에서 첫 무선 인터페이스의 link quality를 읽어 0~4 막대로 변환한다."""
@@ -231,6 +263,18 @@ class HmiBridgeNode(Node):
 
         bars = round(quality / WIFI_LINK_QUALITY_MAX * 4)
         return max(0, min(4, bars))
+
+    def _write(self, data: bytes):
+        # read_serial_callback과 같은 이유(2026-08-11 크래시 실측) - 쓰기 쪽도 동일하게
+        # 방어. 조이스틱/상태/배터리/WiFi 어느 쪽 write든 실패해도 노드는 계속 살아서
+        # 다음 주기에 재시도한다.
+        try:
+            self.ser.write(data)
+        except OSError as e:
+            self.get_logger().error(
+                f'HMI 보드 시리얼 쓰기 실패: {e} (USB 연결 확인 필요)',
+                throttle_duration_sec=5.0
+            )
 
 
 def main():

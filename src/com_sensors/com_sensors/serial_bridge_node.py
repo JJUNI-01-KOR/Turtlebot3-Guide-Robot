@@ -29,7 +29,10 @@ class SensorBridgeNode(Node):
     def __init__(self):
         super().__init__('sensor_bridge_node')
 
-        self.declare_parameter('serial_port', '/dev/ttyACM0')
+        # 2026-08-11: udev 규칙(99-com-robot-serial.rules)으로 시리얼 번호 기반 고정
+        # 심볼릭 링크를 만들어서 ttyACM 번호가 재부팅/재연결 때마다 바뀌는 문제를
+        # 회피함 - 이제 기본값 자체가 항상 메인센서보드를 가리킴.
+        self.declare_parameter('serial_port', '/dev/com_sensorboard')
         self.declare_parameter('baud_rate', 9600)
 
         port = self.get_parameter('serial_port').get_parameter_value().string_value
@@ -55,13 +58,23 @@ class SensorBridgeNode(Node):
         self.timer = self.create_timer(0.05, self.read_serial_callback)
 
     def read_serial_callback(self):
-        if self.ser.in_waiting == 0:
-            return
-
+        # 2026-08-11 실측: USB 연결이 간헐적으로 끊기면 pyserial이 OSError(Input/output
+        # error)를 던지는데, 예외 처리가 없어서 이 콜백(20ms 주기) 안에서 그대로
+        # rclpy executor까지 전파되어 노드 전체가 죽었다(hmi_bridge_node와 동일한
+        # 버그, 실물 세션 중 이 노드도 같은 방식으로 크래시하는 것 실측함). 안 죽고
+        # 다음 주기에 다시 시도하도록 방어(hmi_bridge_node.py의 처리와 동일한 패턴).
         try:
+            if self.ser.in_waiting == 0:
+                return
             line = self.ser.readline().decode('utf-8').strip()
         except UnicodeDecodeError:
             self.get_logger().warn('시리얼 데이터 디코딩 실패, 무시함')
+            return
+        except OSError as e:
+            self.get_logger().error(
+                f'센서보드 시리얼 읽기 실패: {e} (USB 연결 확인 필요, 다음 주기에 재시도)',
+                throttle_duration_sec=5.0
+            )
             return
 
         if not line:
