@@ -8,7 +8,7 @@
   5) com_sensors hmi_bridge_node           (TFT보드, serial_port 오버라이드 필수)
   6) com_service service_manager_node      (임무 상태머신)
   7) com_status status_node                (상태 종합)
-  8) com_service com_voice_node            (음성, service_manager가 /tts_request 발행)
+  8) com_service com_voice_node            (음성, 현재는 발행자 없어 무음)
 
 이 launch 파일은 그 8개를 전부 하나의 `ros2 launch` 프로세스 밑에서 관리한다.
 SSH에서 실행할 때는 README §11 주의사항대로 노드 여러 개를 한 셸 명령에
@@ -17,7 +17,7 @@ launch가 내부적으로 자식 프로세스를 관리하는 방식이라 그 �
 (bash가 여러 `&`/`disown`을 기다리며 멈추는 상황이 아님). 다만 완전히
 분리해서 백그라운드로 띄우고 싶으면 다음과 같이 실행:
 
-  setsid nohup ros2 launch com_launch robot_all.launch.py \
+  setsid nohup ros2 launch com_launch robot_all_launch.py \
       > ~/com_launch.log 2>&1 < /dev/null &
 
 주의:
@@ -26,12 +26,10 @@ launch가 내부적으로 자식 프로세스를 관리하는 방식이라 그 �
   넣어주지만, launch 프로세스 시작 전에 export 해두는 쪽이 더 안전하다).
 - 배터리 11V대(저전압)에서는 OpenCR이 약 90초 후 시리얼 통신 실패로 크래시하는
   현상이 실측됐다 (README §8-1) — 완충 후 기동할 것.
-- 2026-08-11: udev 규칙(99-com-robot-serial.rules, 시리얼 번호 기반)으로
-  /dev/com_sensorboard, /dev/com_tftboard 고정 심볼릭 링크를 만들어서 기본값으로
-  씀 - ttyACM 번호가 재부팅/재연결 때마다 바뀌는 문제(실물 세션에서 여러 번 겪음,
-  hmi_bridge_node가 죽은 포트를 계속 붙잡고 있어서 크래시까지 난 적 있음)를 회피.
-  이 udev 규칙이 없는 새 라즈베리파이라면 다시 ttyACM0/ttyACM2 등으로 오버라이드
-  필요(README §3 참고).
+- hmi_bridge_node의 serial_port 기본값이 com_sensor_bridge_node와 겹쳐서
+  (둘 다 /dev/ttyACM0) 반드시 /dev/ttyACM2로 오버라이드해야 한다.
+  실제 포트가 다르면 hmi_serial_port 인자로 바꿔서 실행할 것:
+    ros2 launch com_launch robot_all_launch.py hmi_serial_port:=/dev/ttyACM3
 - 임무 시작은 TFT+조이스틱 물리 UI 또는:
     ros2 service call /start_mission com_interfaces/srv/StartMission \
       "{destination_id: room1}"
@@ -77,12 +75,11 @@ def generate_launch_description():
                                             'coin_d4_driver를 자동 포함'),
         DeclareLaunchArgument('map', default_value=default_map),
         DeclareLaunchArgument('params_file', default_value=default_params),
-        DeclareLaunchArgument('sensor_serial_port', default_value='/dev/com_sensorboard',
-                               description='com_sensor_bridge_node (메인센서보드) - '
-                                            '99-com-robot-serial.rules 고정 심볼릭 링크'),
-        DeclareLaunchArgument('hmi_serial_port', default_value='/dev/com_tftboard',
-                               description='hmi_bridge_node (TFT보드) - '
-                                            '99-com-robot-serial.rules 고정 심볼릭 링크'),
+        DeclareLaunchArgument('sensor_serial_port', default_value='/dev/ttyACM0',
+                               description='com_sensor_bridge_node (메인센서보드)'),
+        DeclareLaunchArgument('hmi_serial_port', default_value='/dev/ttyACM2',
+                               description='hmi_bridge_node (TFT보드) - 반드시 '
+                                            'com_sensor_bridge_node와 다른 포트'),
 
         SetEnvironmentVariable('TURTLEBOT3_MODEL', turtlebot3_model),
         SetEnvironmentVariable('LDS_MODEL', lds_model),
