@@ -435,10 +435,9 @@ class ServiceManagerNode(Node):
     # 원인과 무관하게 문구가 고정인 상태만 여기 등록 (MissionStateMachine.transition
     # 참고). 나머지 text_key(system_start/ready/guiding_start/arrived/docked_arrive/
     # mission_complete/mission_cancelled)는 발생 지점에서 직접 publish_tts 호출.
-    # EMERGENCY_STOP은 전용 문구가 없어 'error'로 대체 - 필요하면 별도 wav 추가할 것.
     STATE_TTS_MAP = {
         MissionState.ERROR: 'error',
-        MissionState.EMERGENCY_STOP: 'error',
+        MissionState.EMERGENCY_STOP: 'emergency_stop',
         MissionState.PAUSED: 'paused',
     }
 
