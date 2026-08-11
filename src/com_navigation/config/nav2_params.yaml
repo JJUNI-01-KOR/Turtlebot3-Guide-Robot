@@ -16,6 +16,24 @@
 amcl:
   ros__parameters:
     use_sim_time: False
+    # 2026-08-11: 런타임에 /initialpose 토픽으로 위치를 주면 AMCL이 "Failed to
+    # transform initial pose in time"으로 계속 거부하는 문제를 실측(메시지 stamp를
+    # 0으로 보내도 동일 - AMCL이 메시지 stamp가 아니라 자기 now()로 조회하는 것으로
+    # 추정, /odom 20Hz 발행주기와 무관하게 항상 재현됨). 토픽 대신 AMCL 자체 시작
+    # 파라미터로 초기위치를 주면 이 레이스를 안 탄다는 것까지 실측 확인함(Setting
+    # pose 성공, /amcl_pose 정상 발행). 단, 이후 map->odom tf가 계속 갱신되는지는
+    # 별개 문제로 남아있음(README §12 "Nav2가 실제 이동 없이 목표 도달로 오판" 참고).
+    #
+    # 아래 좌표는 waypoints.yaml의 docking 웨이포인트(충전 스테이션 앞 정렬점) 기준 -
+    # URS-001 2.4절 사전조건("로봇의 초기 위치는 충전 스테이션 앞 정렬점")과 일치하는
+    # 정상 운영 시 기본값. **로봇을 다른 곳에 두고 기동하면 이 좌표부터 실제 위치로
+    # 갱신할 것** - 안 그러면 AMCL이 엉뚱한 위치를 확신한 채로 시작함.
+    set_initial_pose: true
+    initial_pose:
+      x: 1.0792808532714844
+      y: 0.901103115081787
+      z: 0.0
+      yaw: 0.0
     alpha1: 0.2
     alpha2: 0.2
     alpha3: 0.2
