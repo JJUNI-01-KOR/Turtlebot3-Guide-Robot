@@ -8,6 +8,8 @@ voice 노드 역할:
 
 import os
 import subprocess
+from collections import deque
+
 import rclpy
 from rclpy.node import Node
 from com_interfaces.msg import TtsRequest
@@ -31,6 +33,15 @@ class VoiceNode(Node):
             10
         )
 
+        # aplay는 ALSA 디바이스를 독점으로 열어서, 이전 재생이 끝나기 전에 다음 요청이
+        # 오면 "Device or resource busy"로 실패하고 그 안내가 통째로 씹힌다(2026-08-11
+        # 통합 디버깅 중 실측: system_start 재생 중 3초 뒤 ready 요청이 겹쳐서 재현됨).
+        # Popen의 비동기 특성(재생 중에도 다른 콜백 처리 가능)은 유지하면서, 큐에 쌓고
+        # 타이머로 이전 재생 종료를 확인한 뒤 순차 재생한다.
+        self._queue = deque()
+        self._current_proc = None
+        self._playback_timer = self.create_timer(0.2, self._pump_queue)
+
         self.get_logger().info(f'voice 노드 시작, 오디오 경로: {self.audio_path}')
 
     def on_tts_request(self, msg: TtsRequest):
@@ -40,12 +51,22 @@ class VoiceNode(Node):
             self.get_logger().warn(f'사전 정의되지 않은 문구 요청: {msg.text_key} (파일 없음, 재생 생략)')
             return
 
-        self.get_logger().info(f'재생: {msg.text_key}')
+        self._queue.append((msg.text_key, wav_file))
+
+    def _pump_queue(self):
+        if self._current_proc is not None and self._current_proc.poll() is None:
+            return  # 아직 이전 재생 중
+
+        if not self._queue:
+            return
+
+        text_key, wav_file = self._queue.popleft()
+        self.get_logger().info(f'재생: {text_key}')
         try:
-            # subprocess로 비동기 실행 -> 재생 중에도 노드가 다른 콜백 처리 가능
-            subprocess.Popen(['aplay', wav_file])
+            self._current_proc = subprocess.Popen(['aplay', wav_file])
         except Exception as e:
             self.get_logger().error(f'오디오 재생 실패: {e} (주행에는 영향 없음)')
+            self._current_proc = None
 
 
 def main():

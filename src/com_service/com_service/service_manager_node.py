@@ -11,7 +11,7 @@ from std_srvs.srv import Trigger
 from sensor_msgs.msg import BatteryState
 from geometry_msgs.msg import Twist
 from com_interfaces.srv import StartMission
-from com_interfaces.msg import ArucoMarker
+from com_interfaces.msg import ArucoMarker, TtsRequest
 from nav2_msgs.action import NavigateToPose
 
 from ament_index_python.packages import get_package_share_directory
@@ -174,6 +174,7 @@ class DockingController:
         self.node.publish_cmd_vel(0.0, 0.0)
         self.node.get_logger().info('정밀 도킹 완료 (정렬 오차 허용범위 이내)')
         self.node.state_machine.transition(MissionState.DOCKED)
+        self.node.publish_tts('docked_arrive')
 
     def check_marker_timeout(self):
         if not self.active or self.last_marker_stamp is None:
@@ -278,6 +279,7 @@ class SafetyMonitor:
             '-> Nav2 goal 취소 후 정지 (SR-021)'
         )
         self.node.state_machine.transition(MissionState.OBSTACLE_STOP)
+        self.node.publish_tts('obstacle')
 
     def _on_obstacle_cleared(self):
         self._obstacle_active = False
@@ -322,6 +324,7 @@ class SafetyMonitor:
         self.node.publish_cmd_vel(0.0, 0.0)
         self.node.get_logger().warn('전방에 사람 감지 -> Nav2 goal 취소 후 정지 대기')
         self.node.state_machine.transition(MissionState.PERSON_WAIT)
+        self.node.publish_tts('person_wait')
 
     def _on_person_cleared(self):
         self._person_active = False
@@ -390,6 +393,14 @@ class MissionStateMachine:
         self.node.publish_state_code(new_state)
         self.node.publish_mission_state(new_state)
 
+        # ERROR/EMERGENCY_STOP/PAUSED는 어느 경로로 들어왔든 문구가 같아서 여기서
+        # 일괄 처리. READY/GUIDING/ARRIVED 등 나머지는 "왜 이 상태가 됐는지"에 따라
+        # 문구가 달라져야 해서(예: READY도 최초 기동 완료 vs 취소 vs 도킹완료가
+        # 서로 다른 문구) 각 호출부에서 개별적으로 publish_tts를 호출한다.
+        tts_key = self.node.STATE_TTS_MAP.get(new_state)
+        if tts_key:
+            self.node.publish_tts(tts_key)
+
         if new_state == MissionState.DOCKING:
             self.node.docking_controller.start()
         else:
@@ -419,6 +430,16 @@ class ServiceManagerNode(Node):
         MissionState.EMERGENCY_STOP: 0x0A,
         MissionState.ERROR: 0x0A,
         MissionState.SHUTDOWN: 0xFF,
+    }
+
+    # 원인과 무관하게 문구가 고정인 상태만 여기 등록 (MissionStateMachine.transition
+    # 참고). 나머지 text_key(system_start/ready/guiding_start/arrived/docked_arrive/
+    # mission_complete/mission_cancelled)는 발생 지점에서 직접 publish_tts 호출.
+    # EMERGENCY_STOP은 전용 문구가 없어 'error'로 대체 - 필요하면 별도 wav 추가할 것.
+    STATE_TTS_MAP = {
+        MissionState.ERROR: 'error',
+        MissionState.EMERGENCY_STOP: 'error',
+        MissionState.PAUSED: 'paused',
     }
 
     def __init__(self):
@@ -468,6 +489,7 @@ class ServiceManagerNode(Node):
         self.battery_percent_pub = self.create_publisher(Float32, '/battery_percent', 10)
         self.mission_state_pub = self.create_publisher(String, '/mission_state', 10)
         self.current_waypoint_pub = self.create_publisher(String, '/current_waypoint_id', 10)
+        self.tts_request_pub = self.create_publisher(TtsRequest, '/tts_request', 10)
 
         self.cancel_mission_srv = self.create_service(
             Trigger, '/cancel_mission', self.on_cancel_mission
@@ -511,6 +533,7 @@ class ServiceManagerNode(Node):
         self.mission_state_timer = self.create_timer(1.0, self.on_mission_state_timer)
 
         self.get_logger().info('service_manager node started (skeleton)')
+        self.publish_tts('system_start')
 
         # SYSTEM_INIT -> LOCALIZING -> READY (SR-031: 30초 이내 active).
         # 실제 AMCL 수렴 판정은 미구현이라, 정해진 대기시간 후 READY로 전이한다.
@@ -522,6 +545,7 @@ class ServiceManagerNode(Node):
         self._ready_timer = None
         if self.state_machine.state == MissionState.LOCALIZING:
             self.state_machine.transition(MissionState.READY)
+            self.publish_tts('ready')
 
     def start_hold_timer(self, duration, callback):
         self.cancel_hold_timer()
@@ -544,6 +568,7 @@ class ServiceManagerNode(Node):
         if self.state_machine.state == MissionState.DOCKED:
             self.get_logger().info(f'DOCKED {self.docked_wait}s 경과 -> READY 복귀')
             self.state_machine.transition(MissionState.READY)
+            self.publish_tts('mission_complete')
 
     def start_return(self):
         self.get_logger().info('복귀 경로 설정 -> 도킹 지점으로 이동')
@@ -575,6 +600,7 @@ class ServiceManagerNode(Node):
         self.safety_monitor.reset_obstacle_retries()
         self.safety_monitor.reset_person_retries()
         self.state_machine.transition(MissionState.GUIDING)
+        self.publish_tts('guiding_start')
         self.get_logger().info(f'start_mission requested: destination={dest}')
 
         self.send_next_waypoint()
@@ -590,6 +616,7 @@ class ServiceManagerNode(Node):
         self.docking_controller.stop()
         self.publish_cmd_vel(0.0, 0.0)
         self.state_machine.transition(MissionState.READY)
+        self.publish_tts('mission_cancelled')
         self.get_logger().info('cancel_mission requested')
         response.success = True
         response.message = '임무를 취소합니다'
@@ -725,6 +752,7 @@ class ServiceManagerNode(Node):
         if wp_id and wp_id == self.waypoint_sequencer.destination_id:
             self.get_logger().info('목적지 도착 -> ARRIVED (ArUco 검증은 8/3~ 예정)')
             self.state_machine.transition(MissionState.ARRIVED)
+            self.publish_tts('arrived')
             return
 
         self.send_next_waypoint()
@@ -807,6 +835,12 @@ class ServiceManagerNode(Node):
         msg = String()
         msg.data = wp_id or ''
         self.current_waypoint_pub.publish(msg)
+
+    def publish_tts(self, text_key: str, sound_effect: str = ''):
+        msg = TtsRequest()
+        msg.text_key = text_key
+        msg.sound_effect = sound_effect
+        self.tts_request_pub.publish(msg)
 
     def publish_cmd_vel(self, linear_x: float, angular_z: float):
         msg = Twist()
