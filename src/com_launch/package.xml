@@ -3,9 +3,19 @@
 <package format="3">
   <name>com_launch</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>전체 노드 통합 launch (README §8 8단계 통합, PM2 미사용)</description>
   <maintainer email="com@todo.todo">com</maintainer>
   <license>TODO: License declaration</license>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>turtlebot3_bringup</exec_depend>
+  <exec_depend>com_bringup</exec_depend>
+  <exec_depend>com_navigation</exec_depend>
+  <exec_depend>com_vision</exec_depend>
+  <exec_depend>com_sensors</exec_depend>
+  <exec_depend>com_service</exec_depend>
+  <exec_depend>com_status</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
