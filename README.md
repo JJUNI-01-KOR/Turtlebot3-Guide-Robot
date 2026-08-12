@@ -1,13 +1,16 @@
 # TurtleBot3 기반 방문자 안내 로봇 (COM팀)
 
-> **최종 업데이트: 2026-08-11.** 아래 내용은 "구현 예정"이 아니라 **실제 동작 확인된 현재 상태** 기준입니다.
-> 8/11: 음성 안내(`/tts_request`) 실제 연결, 사람감지 CPU 최적화, `com_launch` 통합 launch 파일,
-> USB 시리얼 포트 udev 고정, `hmi_bridge_node`/`com_sensor_bridge_node` 크래시 버그 수정,
-> **`/initialpose` 레이스 문제 해결**(`set_initial_pose` 파라미터 방식). 다만 같은 날 실물 테스트로
-> **AMCL이 `map→odom` tf를 지속 갱신하지 못해 Nav2가 실제 이동 없이 "목표 도달"로 오판하는
-> 별도 버그를 새로 발견**(§12) — 8/6 기록된 "실주행 성공"은 실제 이동 시간·최종 위치 오차로
-> 검증된 것이라 유효하지만, **이 버그가 해결되기 전까지는 매번 실주행 여부를 직접 확인 없이
-> `/start_mission` 결과를 신뢰하면 안 됩니다.** 다음 세션 재개 절차는 바로 아래 참고.
+> **최종 업데이트: 2026-08-12.** 아래 내용은 "구현 예정"이 아니라 **실제 동작 확인된 현재 상태** 기준입니다.
+> 8/11: 음성 안내(`/tts_request`) 실제 연결, 사람감지 CPU 최적화, `com_launch` 통합 launch 파일 +
+> **PM2 자동기동/자동재시작(`ecosystem.config.js`)**, USB 시리얼 포트 udev 고정,
+> `hmi_bridge_node`/`com_sensor_bridge_node` 크래시 버그 수정, **`/initialpose` 레이스 문제
+> 해결**(`set_initial_pose` 파라미터 방식). 다만 같은 날 실물 테스트로 **AMCL이 `map→odom` tf를
+> 지속 갱신하지 못해 Nav2가 실제 이동 없이 "목표 도달"로 오판하는 별도 버그를 새로 발견**(§12) —
+> 8/6 기록된 "실주행 성공"은 실제 이동 시간·최종 위치 오차로 검증된 것이라 유효하지만, **이 버그가
+> 해결되기 전까지는 매번 실주행 여부를 직접 확인 없이 `/start_mission` 결과를 신뢰하면 안 됩니다.**
+> 8/12: USB 오디오 동글 재생 끊김(볼륨 100%→80%로 완화), 시리얼 최초연결 재시도 + `in_waiting`
+> ioctl 에러 제거, PM2 실제 가동 확인, `/com_gui_node` 실행 중인 것 발견(구현 범위 미확인).
+> 다음 세션 재개 절차는 바로 아래 참고.
 
 ## 🔋 다음 세션 재개 절차 (2026-08-11 세션, 배터리 충전 후 이어서)
 
@@ -44,7 +47,7 @@
    ros2 topic hz /amcl_pose                # 계속 갱신되는지 (Ctrl+C로 종료)
    ```
    둘 다 멈추지 않고 계속 갱신되면 안전하게 `/start_mission` 테스트 진행. 멈춰있거나 몇십 초씩 안 갱신되면 §12의 "AMCL이 map→odom tf를 지속 갱신 못 함" 항목부터 다시 조사할 것 — **이 상태에서 주행 테스트하면 실제로 안 움직였는데 도착으로 오판할 수 있음.**
-6. **음성 안내가 필요하면 스피커 확인**: USB 오디오 동글(Jieli UACDemoV1.0)이 하드웨어적으로 불안정한 상태로 남아있습니다(§12). `aplay` 아무 wav나 재생해서 실제로 들리는지 먼저 확인하세요.
+6. **음성 안내가 필요하면 스피커 확인**: USB 오디오 동글(Jieli UACDemoV1.0)이 하드웨어적으로 불안정한 상태로 남아있습니다(§12). **2026-08-12: 볼륨 100%(유니티 게인)에서 재생 중 끊김이 재현 확인돼 기본값을 80%로 낮춤 - 이걸로 재생 자체는 안정화됐지만 하드웨어 불안정성 자체가 없어진 건 아니니 여전히 `aplay`로 먼저 확인 권장.**
 
 TurtleBot3 Burger, ROS 2 Humble, Nav2, ArUco 마커를 이용한 실내 방문자 안내 로봇입니다. 로봇은 방문자를 지정 목적지(강의실1~5, 회의실, 인포, 상담실 = room1~room8)까지 자율주행으로 안내하고, 이동 중 온도·습도·불꽃을 측정하며, 임무 완료 후 **ArUco 마커 기반 정밀 도킹**으로 충전 스테이션에 자동 복귀합니다.
 
@@ -86,12 +89,16 @@ TurtleBot3 Burger, ROS 2 Humble, Nav2, ArUco 마커를 이용한 실내 방문�
 - 후방 초음파 장애물 감지(OBSTACLE_STOP) — 2026-08-06 배선 오류 발견·수정(그 전까지는 실제로 동작한 적이 없었음), 실물 검증 예정
 - HMI: TFT 화면 보드 + 조이스틱 메인센서보드 2보드 구성, 한글 UI — 실물 검증 완료
 - 음성 안내(`voice_node`) — 2026-08-11에 `service_manager_node`가 주요 상태 전이(안내 시작/도착/복귀/취소/장애물/사람대기 등) 시점에 `/tts_request`를 실제로 발행하도록 연결 완료, 더 이상 무음 아님. 재생 문구는 gTTS로 생성(`com_service/scripts/generate_audio.py`, 재실행하면 재생성 가능). 연달아 겹쳐 재생 요청되면 이전 재생이 끝날 때까지 큐잉 후 순차 재생(이전엔 ALSA 충돌로 뒤 안내가 씹히는 버그가 있었음, 수정 완료)
-- PyQt 관제 GUI(`com_gui`) — **미구현** (빈 스켈레톤). 목적지 선택은 로봇에 탑재된 TFT+조이스틱으로 함
+- PyQt 관제 GUI(`com_gui`) — **문서상 미구현(빈 스켈레톤)으로 남아있었으나, 2026-08-12에 `ros2 node list`에서 `/com_gui_node`가 실제로 떠 있는 것을 확인함.** 누가/언제 작업했는지, 실제 구현 범위가 어디까지인지는 이 세션에서 확인 못 함 - 다음에 GUI 얘기 나오면 먼저 실물 확인 필요. 목적지 선택은 여전히 로봇 탑재 TFT+조이스틱으로 함
 
 **미구현**
-- 물리 긴급정지 버튼 — 없음. GUI 버튼으로 대체 예정이나 GUI 자체가 미구현이라 긴급정지 기능이 현재 시스템에 없음
+- 물리 긴급정지 버튼 — 없음. GUI 버튼으로 대체 예정이나 GUI 실제 구현 범위 미확인이라 긴급정지 기능이 현재 확실히 동작한다고 보기 어려움
 - `/env_data` 발행자 없음 — 측정 로그 조회(`/get_measurement_log`)는 항상 빈 결과 반환
-- PM2 프로세스 관리 — 도입 안 함. `com_launch/robot_all.launch.py`(2026-08-11)로 한 번에 기동할 수는 있지만 비정상 종료 시 자동 재시작은 없음(§8, §12)
+
+**PM2 프로세스 관리 (2026-08-11 도입, 2026-08-12 실측 확인)**
+- `com_launch/ecosystem.config.js` + `pm2-com.service`(systemd)로 전원 인가 시 8개 노드(bringup/navigation/vision/sensor_bridge/hmi_bridge/service_manager/status/voice) 자동 기동, 노드별 최대 3회 자동 재시작(SR-026).
+- 2026-08-12 실측: 8개 전부 `online` 상태로 장시간 안정 가동 확인(`pm2 list`). **주의**: `pm2 save`로 저장된 마지막 상태가 "전부 stopped"였던 적이 있어, 그 상태로 저장된 채 재부팅하면 자동 기동이 아예 안 될 수 있음 - 부팅 후 `pm2 list`로 전부 `online`인지 항상 확인할 것. 문제 있으면 `pm2 start ~/com_ws/src/com_launch/ecosystem.config.js && pm2 save`로 복구.
+- `com_launch/robot_all.launch.py`(단일 `ros2 launch` 프로세스로 통합)는 수동 디버깅용 대안으로 계속 존재 - **PM2와 동시에 띄우면 노드 중복 실행으로 충돌(리소스 경합·오디오 장치 경합 등)하니 절대 같이 쓰지 말 것**(2026-08-12 실측: 동시 구동 시 CPU load average 7대까지 치솟고 음성 노드가 반복 크래시하는 것 확인).
 
 ---
 
@@ -163,7 +170,7 @@ com_ws/
     │                     #   └─ aruco_node.py : /mission_state 구독해 DOCKING 중엔 사람감지 스킵(CPU 최적화),
     │                     #                       사람감지는 detection_rate(마커, 5Hz)와 분리된
     │                     #                       person_detection_rate(기본 1Hz)로 실행(2026-08-11)
-    ├── com_gui/          # 빈 스켈레톤 (미구현) — 목적지 선택은 TFT+조이스틱으로 대체
+    ├── com_gui/          # 문서상 빈 스켈레톤이었으나 2026-08-12에 /com_gui_node 실행 확인(범위 미확인) — 목적지 선택은 여전히 TFT+조이스틱
     ├── com_launch/       # launch/robot_all.launch.py : §8의 8단계를 하나의 ros2 launch로 통합(2026-08-11)
     ├── com_service/      # 임무 상태머신 + 음성
     │                     #   ├─ mission_state.py       : 상태 14종 정의
@@ -438,6 +445,8 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 - **백그라운드 기동은 노드 하나당 SSH 명령 하나로 분리하세요.** `setsid nohup ros2 run ... > log 2>&1 < /dev/null &` 패턴으로 완전히 분리해야 SSH 세션 종료 후에도 살아있습니다. 여러 노드를 `disown`과 함께 한 명령에 몰아넣으면 원격 bash가 `wait()`에 멈춰서 첫 노드 뒤로 아무것도 안 뜨는 문제가 실측됐습니다 — 절대 한 명령에 여러 노드를 묶지 마세요.
 - 이런 방식으로 백그라운드 기동한 명령은 로컬 도구가 120초 타임아웃으로 "백그라운드로 이동"시킬 수 있는데, 이건 SSH 연결 자체의 특성일 뿐이고 원격 프로세스는 이미 정상적으로 떠 있습니다. 새 SSH 연결로 `ps aux`나 로그 파일을 확인해서 실제 기동 여부를 검증하세요.
 - 노드를 여러 번 껐다 켜면 `ros2 node list`에 노드가 하나도 안 뜨거나 CLI 명령(`topic echo`, `topic hz`)이 응답 없이 멈추는 경우가 있었습니다 — `ros2 daemon stop && ros2 daemon start`로 대체로 해결됩니다(DDS 디스커버리 캐시 오염으로 추정).
+- **(2026-08-12) `ssh host "command"`처럼 비대화형으로 원격 명령을 실행하면 `~/.bashrc`가 안 읽혀서 `ROS_DOMAIN_ID=30`이 적용 안 됩니다.** 이 상태에서 `ros2 topic pub`/`ros2 node list`를 실행하면 기본 도메인(0)으로 붙어서, 실제로는 정상 동작 중인 PM2 관리 노드들이 전혀 안 보이거나(`ros2 node list` 결과 텅 빔) `Waiting for at least 1 matching subscription(s)...`로 계속 멈춥니다 - 노드가 죽은 게 아니라 도메인이 안 맞아서 서로 안 보이는 것이니, 원격 명령엔 항상 `export ROS_DOMAIN_ID=30`을 명시적으로 넣으세요.
+- **(2026-08-12) `robot_all.launch.py`를 PM2가 이미 전체 스택을 띄운 상태에서 추가로 실행하면 절대 안 됩니다.** 노드 이름이 겹쳐서 리소스(특히 USB 오디오 장치)를 두 프로세스가 동시에 붙잡아 재생이 반복 실패/크래시하고, CPU load average도 7대까지 치솟습니다. 뭔가 띄우기 전에 `pm2 list`로 이미 떠 있는지 먼저 확인하는 습관이 필요합니다.
 
 ---
 
@@ -448,12 +457,13 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 | ~~`/initialpose`가 계속 거부됨~~ (해결) | ~~AMCL이 map→odom을 못 잡아 실제 주행 테스트가 막힘~~ | **2026-08-11 해결.** 원인: AMCL이 `/initialpose` 메시지 처리 시 메시지의 `header.stamp`가 아니라 자기 `now()` 기준으로 tf lookup을 해서, `/odom`이 조금이라도 뒤처져 있으면(항상 그럼) `Failed to transform initial pose in time`으로 거부 - 토픽 기반으로는 구조적으로 이 레이스를 못 피함. **해결책: `nav2_params.yaml`의 amcl 섹션에 `set_initial_pose: true` + `initial_pose.x/y/z/yaw`를 박아서 AMCL 시작 시점에 파라미터로 위치를 줌** - 토픽을 아예 안 타서 레이스 자체가 안 생김. 실측: 재시작 즉시 `Setting pose` 성공, `/amcl_pose` 정상 발행 확인. §8-2 참고. **주의: 현재 좌표는 8/11 테스트 시점 로봇의 실제 위치(1강의실 앞) 기준 임시값 - 운영 시 도킹 지점 좌표로 되돌리거나 매번 실제 시작 위치에 맞게 갱신 필요.** |
 | **(신규, 미해결) AMCL이 `map→odom` tf를 지속 갱신 못 함 → Nav2가 실제 이동 없이 "목표 도달"로 오판** | `/start_mission`이 실제로는 로봇이 전혀 안 움직였는데 몇백ms 만에 GUIDING→ARRIVED로 넘어감(2026-08-11 조이스틱 실주행 테스트로 실측, 6m 목적지가 0.65초 만에 "도착" 처리됨) - **주행 로직 전체가 실제로는 검증 안 된 것과 같음** | 로그에 `[tf_help] Transform data too old when converting from map to odom`(수십 초 차이) 직후 `controller_server: Reached the goal!`가 뜸 - AMCL이 초기 위치는 잡지만 이후 `map→odom` tf를 실시간으로 못 갱신하고(스캔 처리 적체로 추정, `Message Filter dropping message... queue is full` 경고 반복 관찰) 오래된 tf 때문에 컨트롤러가 목표까지 거리 계산에 실패 → 거짓 성공으로 처리되는 것으로 보임. 사람감지 A/B 테스트로 CPU/사람감지와 무관함은 확정됐으나 근본 원인(AMCL 처리 적체 자체의 원인)은 미확정. **다음 세션 최우선 과제** - `amcl_pose`/`tf`가 스캔 주기(라이다 10Hz)만큼 계속 갱신되는지 실측 확인부터 시작할 것 |
 | Nav2 + 비전(카메라+ArUco+사람감지)을 Pi4 한 대에서 동시 구동 시 CPU 부하(load average 5대, 4코어 기준)로 `/tf`·`/scan`이 간헐적으로 끊김 | 주행 중 정지·타임아웃 가능성 | `nav2_params.yaml` 튜닝 + 2026-08-11 사람감지 주기 분리·단일스레드화(`aruco_node` CPU 67.5%→52%)로 완화(완전 해결 아님). 단, 위 `/initialpose` 문제와는 무관함이 확정됨(A/B 테스트 참고) |
-| USB 시리얼 장치(메인센서보드/TFT보드/OpenCR/오디오)가 간헐적으로 재연결됨 | 예전엔 이때 `hmi_bridge_node`/`com_sensor_bridge_node`가 예외처리 없이 그대로 죽었음(수동 재시작 전까지 HMI 화면·조이스틱·센서값 전부 먹통) | 2026-08-11: 두 노드 모두 시리얼 read/write를 `OSError` try/except로 감싸서 죽지 않고 재시도하도록 수정. 포트 번호 자체가 바뀌는 문제는 udev 규칙으로 별도 해결(§3, §6-⑤). USB 오디오 동글(스피커)은 여전히 하드웨어 자체가 불안정 - 별도 조치 필요(다른 포트/케이블/동글 교체) |
-| 물리 긴급정지 버튼 없음 | 긴급정지 기능이 현재 시스템에 아예 없음 | GUI 버튼으로 대체 예정, `com_gui` 미구현이라 보류 |
+| USB 시리얼 장치(메인센서보드/TFT보드/OpenCR/오디오)가 간헐적으로 재연결됨 | 예전엔 이때 `hmi_bridge_node`/`com_sensor_bridge_node`가 예외처리 없이 그대로 죽었음(수동 재시작 전까지 HMI 화면·조이스틱·센서값 전부 먹통) | 2026-08-11: 두 노드 모두 시리얼 read/write를 `OSError` try/except로 감싸서 죽지 않고 재시도하도록 수정. **2026-08-12 추가 수정: 최초 연결 자체가 실패하면(USB 전원 불안정) 그대로 죽어서 PM2가 노드를 통째로 재시작해야 했던 문제 - 5회/2초 간격 재시도로 방어. 이 CDC-ACM 보드에서 `in_waiting`(ioctl) 체크가 간헐적으로 `Inappropriate ioctl for device`를 던지던 것도 발견, `in_waiting` 없이 `readline()` 자체 짧은 timeout에 맡기도록 변경 - 실측 결과 두 노드 모두 장시간(8분+) 에러 0건.** 포트 번호 자체가 바뀌는 문제는 udev 규칙으로 별도 해결(§3, §6-⑤) |
+| USB 오디오 동글(Jieli UACDemoV1.0, 스피커) 재생 중 끊김/잡음 | `aplay: write error: No such device` 이후 ALSA가 카드를 아예 못 찾아(`Cannot get card index for 1`) 안내가 깨지거나 통째로 안 들림 | **2026-08-12: 볼륨 100%(유니티 게인)가 원인 중 하나로 확인 - 80%(-6.36dB)로 낮추니 반복 재생에도 끊김 없음(실측, `/tts_request` 실제 파이프라인으로 검증). `voice_node.py`의 `volume` 파라미터 기본값을 80으로 변경.** 단, USB 동글 자체가 여전히 불안정한 하드웨어라는 근본 문제는 남아있음(간헐적 재연결 등) - 완전 해결은 아니고 완화 |
+| 물리 긴급정지 버튼 없음 | 긴급정지 기능이 현재 시스템에 아예 없음 | GUI 버튼으로 대체 예정. `com_gui` 문서상 미구현이었으나 2026-08-12에 `/com_gui_node`가 실제로 떠 있는 것을 발견 - 실제 긴급정지 버튼 구현 여부는 미확인, 다음에 확인 필요 |
 | `/env_data` 발행자 없음 | 측정 로그 조회가 항상 빈 결과 | 미착수 (온습도+waypoint_id를 묶는 다리 노드 필요) |
 | `WaypointSequencer`의 `trajectory_1`/`trajectory_2` 경유점 시퀀스 미정의 | 출발지→목적지, 목적지→도킹이 경유점 없이 직행(Nav2 자체 경로계획에 의존) | 설계상 문제는 아니나 문서(SR-006)와는 다름 |
 | ArUco 도킹 정렬 신뢰성 | 다중 마커 동시 검출 시 잘못된 마커를 보고하던 버그는 수정(2026-08-06)했으나 실물 재검증 필요 | 다음 세션에서 재시도 필요 |
-| PM2 미도입 | 노드 비정상 종료 시 자동 재시작 없음 | 수동 운영으로 대체, `com_launch/robot_all.launch.py`(2026-08-11)로 8개 노드 그룹을 한 번에 기동하는 것까지는 가능해졌으나 자동 재시작 기능은 아님 |
+| ~~PM2 미도입~~ (해결) | ~~노드 비정상 종료 시 자동 재시작 없음~~ | **2026-08-11 도입, 2026-08-12 실측 확인.** `com_launch/ecosystem.config.js` + `pm2-com.service`로 전원 인가 시 8개 노드 자동 기동 + 노드별 최대 3회 자동 재시작(SR-026). 단 `pm2 save` 저장 상태가 "전부 stopped"면 재부팅해도 자동 기동 안 될 수 있으니 부팅 후 `pm2 list` 확인 습관 필요. `robot_all.launch.py`는 수동 디버깅용 대안으로 남아있으나 **PM2와 동시 실행 금지**(노드 중복으로 리소스·오디오 장치 경합, 2026-08-12 실측: load average 7대까지 치솟고 음성 노드 반복 크래시) |
 | libcamera 0.1(vc4 파이프라인)에서 `orientation` 파라미터 미지원 | 카메라 프레임이 상하 반전되어 들어옴 | `aruco_node.py`에서 `cv2.rotate(frame, cv2.ROTATE_180)`로 코드에서 보정 처리 완료 |
 | `coin_d4_driver` 전체 빌드 시 간헐적 Aborted | 통합 빌드 시간 지연 가능 | 미해결, 재확인 필요 |
 
