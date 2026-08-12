@@ -38,12 +38,13 @@ class SensorBridgeNode(Node):
         port = self.get_parameter('serial_port').get_parameter_value().string_value
         baud = self.get_parameter('baud_rate').get_parameter_value().integer_value
 
-        try:
-            self.ser = serial.Serial(port, baud, timeout=1.0)
-            self.get_logger().info(f'시리얼 연결 성공: {port} @ {baud}')
-        except serial.SerialException as e:
-            self.get_logger().error(f'시리얼 연결 실패: {e}')
-            raise
+        # 2026-08-12: 최초 연결 시도가 USB 불안정(전원/허브 등)으로 실패하면 바로
+        # 예외를 던져서 프로세스가 죽었고, PM2가 노드 초기화부터 통째로 재시작해야
+        # 했다(재시작 카운트가 수십 회까지 누적되는 것 실측). read_serial_callback/
+        # _write와 동일한 방어 철학을 최초 연결에도 적용 - 몇 초 기다리면 USB가
+        # 다시 붙는 경우가 많으므로, 바로 죽지 않고 같은 프로세스 안에서 재시도한다.
+        self.ser = self._open_serial_with_retry(port, baud, max_retries=5, retry_delay_sec=2.0)
+        self.get_logger().info(f'시리얼 연결 성공: {port} @ {baud}')
 
         sensor_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
 
@@ -57,16 +58,43 @@ class SensorBridgeNode(Node):
 
         self.timer = self.create_timer(0.05, self.read_serial_callback)
 
+    def _open_serial_with_retry(self, port, baud, max_retries=5, retry_delay_sec=2.0):
+        """USB 포트가 순간적으로 흔들려서 첫 시도에 열기 실패해도 바로 죽지 않고
+        잠깐 기다렸다가 재시도한다 (2026-08-12: 'Inappropriate ioctl for device'
+        등 USB 전원 불안정으로 인한 연결 실패 실측 대응).
+        """
+        import time
+        last_exc = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                # 2026-08-12: timeout=1.0이면 read_serial_callback(20~50ms 주기) 안에서
+                # readline()이 최대 1초까지 블로킹할 수 있어 다른 콜백이 밀릴 수 있다.
+                # 짧게 잡아서 타이머 주기와 어울리게 함.
+                return serial.Serial(port, baud, timeout=0.05)
+            except serial.SerialException as e:
+                last_exc = e
+                self.get_logger().warn(
+                    f'시리얼 연결 실패 (시도 {attempt}/{max_retries}): {e} '
+                    f'- {retry_delay_sec}초 후 재시도'
+                )
+                time.sleep(retry_delay_sec)
+        self.get_logger().error(f'{max_retries}회 재시도 모두 실패, 노드를 종료합니다: {last_exc}')
+        raise last_exc
+
     def read_serial_callback(self):
         # 2026-08-11 실측: USB 연결이 간헐적으로 끊기면 pyserial이 OSError(Input/output
         # error)를 던지는데, 예외 처리가 없어서 이 콜백(20ms 주기) 안에서 그대로
         # rclpy executor까지 전파되어 노드 전체가 죽었다(hmi_bridge_node와 동일한
         # 버그, 실물 세션 중 이 노드도 같은 방식으로 크래시하는 것 실측함). 안 죽고
         # 다음 주기에 다시 시도하도록 방어(hmi_bridge_node.py의 처리와 동일한 패턴).
+        # 2026-08-12: in_waiting(ioctl FIONREAD)이 이 보드(CDC-ACM)에서 간헐적으로
+        # 'Inappropriate ioctl'/'Input/output error'를 던지는 것 실측 - 실제 read는
+        # 문제없이 되는데(sudo cat으로 확인) in_waiting 체크만 불안정했다. in_waiting
+        # 없이 readline()의 자체 timeout(위에서 0.05초로 설정)에 맡기도록 변경.
         try:
-            if self.ser.in_waiting == 0:
-                return
             line = self.ser.readline().decode('utf-8').strip()
+            if not line:
+                return
         except UnicodeDecodeError:
             self.get_logger().warn('시리얼 데이터 디코딩 실패, 무시함')
             return

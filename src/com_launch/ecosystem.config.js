@@ -73,13 +73,13 @@ module.exports = {
       script: RUN,
       // 99-com-robot-serial.rules(팀 기존 udev 규칙)의 고정 심볼릭 링크 사용.
       // ttyACM 번호에 의존하지 않아 재부팅/재연결 순서가 바뀌어도 안전하다.
-      args: 'run com_sensors com_sensor_bridge_node --ros-args -p serial_port:=/dev/com_sensor_board',
+      args: 'run com_sensors com_sensor_bridge_node --ros-args -p serial_port:=/dev/com_sensorboard',
     },
     {
       ...COMMON,
       name: 'hmi_bridge',
       script: RUN,
-      args: 'run com_sensors hmi_bridge_node --ros-args -p serial_port:=/dev/com_hmi_board',
+      args: 'run com_sensors hmi_bridge_node --ros-args -p serial_port:=/dev/com_tftboard',
     },
     {
       ...COMMON,
