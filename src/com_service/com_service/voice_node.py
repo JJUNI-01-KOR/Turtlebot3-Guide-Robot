@@ -21,10 +21,11 @@ class VoiceNode(Node):
 
         self.declare_parameter('audio_library_path',
                                 os.path.expanduser('~/com_ws/src/com_service/audio'))
-        # 기본 100 - 2026-08-11 실측: 로봇 USB 오디오 동글(Jieli UACDemoV1.0)이 ALSA
-        # 믹서 100%(-0.94dB, 사실상 유니티 게인)로 올려도 스피커가 겨우 들릴 정도라
-        # 낮출 여유가 없음. wav 자체도 생성 시 게인을 올려둠(generate_audio.py 참고).
-        self.declare_parameter('volume', 100)
+        # 2026-08-12 실측: 100%(-0.94dB, 유니티 게인)에서 USB 오디오 동글(Jieli
+        # UACDemoV1.0)이 재생 중 끊김/치직거림(aplay write error: No such device,
+        # 이후 ALSA가 카드 자체를 못 찾음)을 반복 유발함 - 30%는 재생은 안정적이나
+        # 너무 작아서 안 들림. 80%(-6.36dB)로 고정 - 사용자 실측 확인.
+        self.declare_parameter('volume', 80)
 
         self.audio_path = self.get_parameter('audio_library_path').get_parameter_value().string_value
         self.volume = self.get_parameter('volume').get_parameter_value().integer_value
