@@ -10,6 +10,9 @@
  *  아날로그/디지털 핀을 직접 읽지 않는다.
  *
  *  화면 상태:
+ *    WELCOME : 전원 인가 직후 2.5초간 "환영합니다" 웰컴 화면 표시 후 자동으로 SELECT로
+ *              전환(2026-08-12 추가, 기존 웰컴 라이트를 대체). 실제 주행상태와 무관한
+ *              부팅 시퀀스 전용 화면 - 로컬 타이머만 씀.
  *    SELECT  : waypoints.yaml 목적지 메뉴 표시, 파이가 중계한 조이스틱 명령으로 선택
  *              (목적지 CONFIRM 1번째는 확인화면, 2번째에 실제 출발)
  *    MOVING  : 스캔라인 렌더러로 그린 눈(SCAN 표정) - 이동 중
@@ -126,8 +129,11 @@ int cursorIdx = 0, prevCursor = -1;
 bool confirmPending = false;  // true = 목적지 확인 화면 표시 중 (한번 더 눌러야 실제 출발)
 
 // ---------------- 화면 상태 ----------------
-enum UIState { SELECT, MOVING, ARRIVED, IDLE_SCREENSAVER };
+enum UIState { WELCOME, SELECT, MOVING, ARRIVED, IDLE_SCREENSAVER };
 UIState uiState = SELECT;
+
+#define WELCOME_MS 2500UL
+unsigned long welcomeAt = 0;
 
 // 메뉴/확인화면에서 30초간 조이스틱 입력이 없으면 대기용 눈 애니메이션으로 전환
 // (실제 주행 중이라는 뜻은 아님 - 그냥 화면보호기, MOVING과 표정만 다름).
@@ -591,12 +597,41 @@ const uint8_t PHRASE_SELECT_TITLE[] PROGMEM = { G_MOK, G_JEOK, G_JI, G_SPACE, G_
 const uint8_t PHRASE_PRESS_AGAIN[]  PROGMEM = { G_DA, G_SI, G_SPACE, G_NU, G_REU, G_MYEON, G_SPACE, G_CHUL, G_BAL };  // 다시 누르면 출발
 const uint8_t PHRASE_CANCEL[]       PROGMEM = { G_JO, G_I, G_SEU, G_TIK, G_EU, G_RO, G_SPACE, G_CHWI, G_SO };         // 조이스틱으로 취소
 const uint8_t PHRASE_ARRIVED[]      PROGMEM = { G_DO, G_CHAK };                                            // 도착
+const uint8_t PHRASE_WELCOME[]      PROGMEM = { G_HWAN, G_YEONG, G_HAP, G_NI, G_DA };                      // 환영합니다
+
+// 전원 인가 직후 2.5초간 보여주는 웰컴 화면 (2026-08-12 추가, 기존 웰컴 라이트 대체).
+// setup()에서 한 번 호출되고, loop()의 WELCOME 분기가 시간 경과 후 enterSelect()로 넘긴다.
+void enterWelcome() {
+  uiState = WELCOME;
+  welcomeAt = millis();
+  tft.fillScreen(BLACK);
+  resetStatusBar();
+
+  // "환영합니다" 큰 글씨 중앙 정렬 (glyph 5개, scale=3 -> 60px/글자 + 6px 간격)
+  const uint8_t scale = 3;
+  const int glyphPx = HANGUL_GLYPH_W * scale;
+  const int gap = 2 * scale;
+  const int n = sizeof(PHRASE_WELCOME);
+  const int textW = n * glyphPx + (n - 1) * gap;
+  drawHangulPhrase((480 - textW) / 2, 110, PHRASE_WELCOME, n, CYAN, scale);
+
+  // 부제(ASCII, 기존 폰트 재사용 - 새 글리프 불필요)
+  tft.setTextSize(2);
+  tft.setTextColor(GRAY);
+  const char* sub = "COM Visitor Guide Robot";
+  int subW = strlen(sub) * 12;  // Adafruit_GFX 기본폰트: size 2에서 문자당 12px
+  tft.setCursor((480 - subW) / 2, 210);
+  tft.print(sub);
+
+  tft.drawFastHLine(140, 240, 200, GRAY);
+}
 
 void enterSelect() {
   uiState = SELECT;
   confirmPending = false;
   lastInputAt = millis();
   tft.fillScreen(BLACK);
+  resetStatusBar();
   drawHangulPhrase(20, 8, PHRASE_SELECT_TITLE, sizeof(PHRASE_SELECT_TITLE), CYAN, 1);
   prevCursor = -1;
   drawMenu();
@@ -625,6 +660,7 @@ void drawMenu() {
 // (실수로 조이스틱 버튼을 잘못 눌러 엉뚱한 곳으로 출발하는 걸 방지).
 void drawConfirmPrompt() {
   tft.fillScreen(BLACK);
+  resetStatusBar();
   drawHangulPhrase(20, 8, PHRASE_SELECT_TITLE, sizeof(PHRASE_SELECT_TITLE), CYAN, 1);
 
   drawDestLabel(30, 100, DESTINATIONS[cursorIdx], YEL, 2);
@@ -650,6 +686,7 @@ void enterMoving() {
   applyExpr(7);                 // SCAN
   palOverride = 255;
   tft.fillScreen(BLACK);
+  resetStatusBar();
 
   lookX = 0; lookY = 0;
   gazePending = false;
@@ -670,6 +707,7 @@ void enterScreensaver() {
   applyExpr(0);                 // IDLE
   palOverride = 255;
   tft.fillScreen(BLACK);
+  resetStatusBar();
 
   lookX = 0; lookY = 0;
   gazePending = false;
@@ -689,6 +727,7 @@ void enterArrived() {
   applyExpr(1);                 // HAPPY
   palOverride = 255;
   tft.fillScreen(BLACK);
+  resetStatusBar();
 
   lookX = 0; lookY = 0;
   drawBothFull();
@@ -698,10 +737,17 @@ void enterArrived() {
   tft.setCursor(282, 246); tft.print("!");
 }
 
+// 2026-08-12: 화면 전환마다 fillScreen(BLACK)이 상태바 영역까지 지우는데, drawStatusBar()는
+// battery/wifi "값이 바뀔 때만" 다시 그려서 값이 마침 그대로면 화면 전환 직후 상태바가 빈
+// 채로 남아있던 버그(특히 MOVING 진입 시 실측 확인) - pb/pw를 전역으로 빼서 각 화면 진입
+// 함수(enterWelcome/enterSelect/enterMoving/enterScreensaver/enterArrived)에서 강제로
+// -1로 리셋해 다음 drawStatusBar() 호출에서 무조건 다시 그리게 한다.
+int statusBarPrevBattery = -1, statusBarPrevWifi = -1;
+void resetStatusBar() { statusBarPrevBattery = -1; statusBarPrevWifi = -1; }
+
 void drawStatusBar() {
-  static int pb = -1, pw = -1;
-  if (battery == pb && wifi == pw) return;
-  pb = battery; pw = wifi;
+  if (battery == statusBarPrevBattery && wifi == statusBarPrevWifi) return;
+  statusBarPrevBattery = battery; statusBarPrevWifi = wifi;
   tft.fillRect(360, 0, 120, 30, BLACK);
   uint16_t bc = battery > 50 ? GREEN : battery > 20 ? YEL : RED;
   tft.drawRect(430, 5, 36, 18, WHITE);
@@ -814,7 +860,7 @@ void setup() {
   tft.setRotation(3);
 
   applyExpr(0);
-  enterSelect();
+  enterWelcome();
 
   Serial.println("READY");
 }
@@ -823,6 +869,9 @@ void loop() {
   readSerial();
 
   switch (uiState) {
+    case WELCOME:
+      if (millis() - welcomeAt > WELCOME_MS) { enterSelect(); }
+      break;
     case SELECT:
       if (millis() - lastInputAt > IDLE_SCREENSAVER_MS) {
         enterScreensaver();
