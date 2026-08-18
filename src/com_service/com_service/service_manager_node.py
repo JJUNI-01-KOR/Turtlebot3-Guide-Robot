@@ -1,14 +1,18 @@
+import math
 import os
 import yaml
+from collections import deque
 
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.time import Time as RclpyTime
 
 from std_msgs.msg import UInt8, String, Float32, Bool
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import BatteryState
+from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from com_interfaces.srv import StartMission
 from com_interfaces.msg import ArucoMarker, TtsRequest
@@ -17,6 +21,33 @@ from nav2_msgs.action import NavigateToPose
 from ament_index_python.packages import get_package_share_directory
 
 from com_service.mission_state import MissionState
+
+
+def _wrap_pi(angle: float) -> float:
+    """각도를 -pi ~ +pi 로 접는다.
+    안 하면 359도 -> 1도 넘어갈 때 오차가 -358도로 튀어 판정이 뒤집힌다."""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def _odom_yaw(q) -> float:
+    """오도메트리 쿼터니언 -> z축(수직) 회전각. 2륜 로봇은 yaw만 필요."""
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _marker_yaw(q) -> float:
+    """마커 자세 쿼터니언 -> "마커가 좌우로 얼마나 비틀렸나".
+
+    카메라 좌표계는 x=오른쪽, y=아래, z=전방이므로 수직축은 y축이다.
+    따라서 회전행렬 R에 대해 yaw = atan2(-R20, R00) 이고, 쿼터니언으로는
+        R00 = 1 - 2(y^2 + z^2),  R20 = 2(xz - wy)
+    로봇이 마커 정면에 있으면 0이 나온다.
+    (부호가 실제 방향과 반대면 dock_k_yaw 를 음수로 주면 된다.)
+    """
+    r00 = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    r20 = 2.0 * (q.x * q.z - q.w * q.y)
+    return math.atan2(-r20, r00)
 
 
 class WaypointSequencer:
@@ -106,7 +137,33 @@ class DockingController:
 
     입력: /aruco_marker (ArucoMarker.msg) - DOCKING 상태에서만 처리
     출력: /cmd_vel (저속, docking_speed_limit 이하)
+
+    ═══ 2026-08-18 개정: 360도 탐색 -> 좌 90도 고정 회전 ═══
+
+    [문제] 도킹 지점 도착 후 15도씩 회전하며 마커를 찾다가, 마커를 이미
+           지나친 뒤에야 "여기 있다"고 인식해 엉뚱한 방향으로 갔다.
+
+    [원인] 카메라 파이프라인 지연. 이미지가 촬영된 시각과 /aruco_marker가
+           발행되는 시각 사이에 Pi4에서 수백 ms가 걸린다(캡처 -> image_raw ->
+           aruco 노드 5Hz 타이머 -> solvePnP). 회전 중이면 그 지연 동안
+           로봇이 계속 돌기 때문에, 받은 좌우오차는 "과거의 값"이고
+           현재 로봇은 이미 마커를 지나쳐 있다. 회전이 빠를수록 더 어긋난다.
+
+    [해결] 두 가지를 같이 적용한다.
+      (1) 움직이면서는 절대 마커를 판정하지 않는다. 좌 90도로 돌고 -> 완전히
+          멈추고 -> 그 다음에 본다 (stop-and-look).
+      (2) 멈춘 뒤에도, 멈추기 전에 '촬영된' 프레임이 뒤늦게 도착할 수 있다.
+          aruco 노드는 pose.header.stamp 에 카메라 프레임 시각을 넣어주므로,
+          그 값이 정지 시각보다 이전이면 통째로 버린다. 이게 없으면 정지
+          직후 회전 중 찍힌 낡은 값 하나에 속아서 똑같은 문제가 반복된다.
+
+    단계(phase):
+      TURN_LEFT -> SETTLE -> ALIGN -> (정렬 완료 시 DOCKED)
     """
+
+    PHASE_TURN_LEFT = 'TURN_LEFT'
+    PHASE_SETTLE = 'SETTLE'
+    PHASE_ALIGN = 'ALIGN'
 
     def __init__(self, node: Node):
         self.node = node
@@ -114,6 +171,15 @@ class DockingController:
         self.docking_max_attempts = node.get_parameter('docking_max_attempts').value
         self.aruco_search_max = node.get_parameter('aruco_search_max').value
         self.dock_marker_id = node.get_parameter('dock_marker_id').value
+
+        self.dock_turn_left_angle = node.get_parameter('dock_turn_left_angle').value
+        self.dock_nudge_angle = node.get_parameter('dock_nudge_angle').value
+        self.dock_turn_speed = node.get_parameter('dock_turn_speed').value
+        self.dock_turn_tolerance = node.get_parameter('dock_turn_tolerance').value
+        self.dock_settle_time = node.get_parameter('dock_settle_time').value
+        self.dock_stale_margin = node.get_parameter('dock_stale_margin').value
+        self.k_yaw = node.get_parameter('dock_k_yaw').value
+        self.use_yaw_term = node.get_parameter('dock_use_yaw_term').value
 
         self.lateral_tolerance = 0.02
         self.distance_tolerance = 0.03
@@ -126,25 +192,119 @@ class DockingController:
         self.k_lateral = 0.8
         self.k_distance = 0.3
 
+        self.phase = self.PHASE_TURN_LEFT
+        self.turn_accum = 0.0
+        self.turn_prev_yaw = None
+        self.turn_goal = self.dock_turn_left_angle
+        self.stop_time = None
+
+    # ── 시작/정지 ──
     def start(self):
         self.active = True
         self.attempt_count = 0
         self.search_count = 0
         self.last_marker_stamp = self.node.get_clock().now()
-        self.node.get_logger().info('DockingController 시작: ArUco 마커 탐색 대기')
+        self._begin_turn_left()
+        self.node.get_logger().info(
+            'DockingController 시작: 좌 %.0f도 회전 후 마커 확인'
+            % (self.dock_turn_left_angle * 180.0 / math.pi)
+        )
 
     def stop(self):
         self.active = False
         self.node.publish_cmd_vel(0.0, 0.0)
 
+    def _begin_turn_left(self, angle=None):
+        """좌회전 시작. angle 을 주면 그만큼만 돈다(미세 스캔용)."""
+        self.phase = self.PHASE_TURN_LEFT
+        self.turn_accum = 0.0
+        self.turn_prev_yaw = self.node.odom_yaw
+        self.turn_goal = self.dock_turn_left_angle if angle is None else angle
+        self.stop_time = None
+
+    def _enter_settle(self):
+        self.phase = self.PHASE_SETTLE
+        self.node.publish_cmd_vel(0.0, 0.0)
+        # 정지 시각을 기록해두고, 이보다 먼저 촬영된 마커 프레임은 전부 버린다.
+        self.stop_time = self.node.get_clock().now()
+        self.node.get_logger().info(
+            '좌회전 완료 (목표 %.1f도 / 실제 %.1f도) - 정지 후 마커 확인 대기'
+            % (self.turn_goal * 180.0 / math.pi,
+               self.turn_accum * 180.0 / math.pi)
+        )
+
+    # ── 주기 처리 (docking_timer, 20Hz) ──
+    def update(self):
+        if not self.active:
+            return
+        if self.phase == self.PHASE_TURN_LEFT:
+            self._update_turn_left()
+        elif self.phase == self.PHASE_SETTLE:
+            # 정지 유지. 마커는 on_aruco_marker 콜백이 받아서 ALIGN으로 넘긴다.
+            self.node.publish_cmd_vel(0.0, 0.0)
+
+    def _update_turn_left(self):
+        yaw = self.node.odom_yaw
+        if yaw is None:
+            self.node.get_logger().warn(
+                '/odom 미수신 - 좌회전 대기', throttle_duration_sec=3.0
+            )
+            return
+
+        if self.turn_prev_yaw is None:
+            self.turn_prev_yaw = yaw
+            return
+
+        # 누적 방식: 매 주기 yaw 차분을 더한다. 시작yaw와 현재yaw를 직접 빼면
+        # +pi/-pi 경계에서 부호가 뒤집혀 판정이 오락가락한다.
+        self.turn_accum += abs(_wrap_pi(yaw - self.turn_prev_yaw))
+        self.turn_prev_yaw = yaw
+
+        remaining = self.turn_goal - self.turn_accum
+        if remaining <= self.dock_turn_tolerance:
+            self._enter_settle()
+            return
+
+        # 목표 근처 감속 - 관성 오버슈트를 줄인다
+        speed = self.dock_turn_speed
+        if remaining < 0.35:      # 약 20도
+            speed = max(0.12, self.dock_turn_speed * remaining / 0.35)
+        self.node.publish_cmd_vel(0.0, speed)   # +값 = 좌회전(CCW)
+
+    # ── 마커 콜백 ──
     def on_aruco_marker(self, msg: ArucoMarker):
         if not self.active:
             return
+        # aruco 노드는 미검출 시 marker_id=-1 을 계속 발행한다.
+        # 이 조건 하나로 '미검출'과 '다른 마커'가 같이 걸러진다.
         if msg.marker_id != self.dock_marker_id:
             return
 
+        # 회전 중에 들어온 값은 카메라 지연 때문에 이미 과거의 값이다. 무시.
+        if self.phase == self.PHASE_TURN_LEFT:
+            return
+
+        # 정지 전에 '촬영된' 프레임이 뒤늦게 도착한 것이면 버린다.
+        # pose.header.stamp 는 aruco 노드가 넣어준 카메라 프레임 시각이라
+        # 발행 시각이 아니라 실제 촬영 시각 기준으로 판정할 수 있다.
+        if self.stop_time is not None:
+            frame_time = RclpyTime.from_msg(msg.pose.header.stamp)
+            age = (frame_time - self.stop_time).nanoseconds / 1e9
+            if age < self.dock_stale_margin:
+                self.node.get_logger().debug(
+                    '정지 이전에 촬영된 낡은 마커 프레임 무시 (%.2fs)' % age
+                )
+                return
+
         self.last_marker_stamp = self.node.get_clock().now()
         self.search_count = 0
+
+        if self.phase == self.PHASE_SETTLE:
+            self.phase = self.PHASE_ALIGN
+            self.node.get_logger().info(
+                '마커 확인 (거리 %.2fm, 좌우 %+.3fm) - 정렬/접근 시작'
+                % (msg.distance_error, msg.lateral_error)
+            )
 
         if self._is_aligned(msg):
             self._on_dock_success()
@@ -157,12 +317,20 @@ class DockingController:
         lateral = marker.lateral_error
         distance = marker.distance_error
 
-        angular_z = -self.k_lateral * lateral
+        # ArucoMarker.msg 에는 yaw_error 필드가 없지만, pose.orientation 에
+        # solvePnP 결과가 그대로 들어있으므로 여기서 직접 뽑는다.
+        # lateral 항만 쓰면 마커 '위치'로 커브를 그리며 갈 뿐이라, 도착했을 때
+        # 마커를 비스듬히 보게 된다. yaw 항이 "마커 정면 직선 위로 올라타라"는
+        # 성분을 더해줘서 전진하는 동안 두 오차가 같이 0으로 수렴한다.
+        steer = self.k_lateral * lateral
+        if self.use_yaw_term:
+            steer += self.k_yaw * _marker_yaw(marker.pose.pose.orientation)
+
+        angular_z = -steer
         linear_x = self.k_distance * distance
 
         linear_x = max(-self.docking_speed_limit, min(self.docking_speed_limit, linear_x))
         angular_z = max(-0.3, min(0.3, angular_z))
-
         return linear_x, angular_z
 
     def _is_aligned(self, marker: ArucoMarker) -> bool:
@@ -177,21 +345,38 @@ class DockingController:
         self.node.publish_tts('docked_arrive')
 
     def check_marker_timeout(self):
+        """마커를 오래 못 보면 재시도.
+
+        2026-08-18: 예전의 '15도씩 회전 재탐색'을 제거했다. 회전하면서 찾는
+        방식이 바로 카메라 지연 때문에 마커를 지나치는 원인이었다. 대신
+        제자리에서 다시 좌 90도 회전을 시도한다(오도메트리 오차 누적 대비).
+        """
         if not self.active or self.last_marker_stamp is None:
             return
+        if self.phase == self.PHASE_TURN_LEFT:
+            return      # 회전 중엔 원래 마커가 안 보이는 게 정상
 
         elapsed = (self.node.get_clock().now() - self.last_marker_stamp).nanoseconds / 1e9
         if elapsed < 5.0:
             return
 
         self.search_count += 1
-        if self.search_count > self.aruco_search_max:
-            self.node.get_logger().error('ArUco 마커 재탐색 3회 실패 -> 정지 후 관리자 알림')
-            self.active = False
-            self.node.publish_cmd_vel(0.0, 0.0)
-            self.node.state_machine.transition(MissionState.ERROR)
+        self.last_marker_stamp = self.node.get_clock().now()
+
+        if self.search_count <= self.aruco_search_max:
+            # 2026-08-18: 예전엔 여기서 제자리 대기만 해서, 회전이 조금 모자라
+            # 마커가 화각 밖에 있으면 영원히 못 찾았다. 이제 dock_nudge_angle
+            # 만큼만 더 돌고 다시 멈춰서 본다("돌고-멈추고-보고" 반복).
+            # 회전 중에는 절대 판정하지 않으므로 카메라 지연 문제는 생기지 않는다.
+            self.node.get_logger().warn(
+                'ArUco 마커 미검출 %.1fs -> 좌로 %.0f도 더 돌고 재확인 (%d/%d)'
+                % (elapsed, self.dock_nudge_angle * 180.0 / math.pi,
+                   self.search_count, self.aruco_search_max)
+            )
+            self._begin_turn_left(self.dock_nudge_angle)
             return
 
+        self.search_count = 0
         self.attempt_count += 1
         if self.attempt_count > self.docking_max_attempts:
             self.node.get_logger().error('도킹 시도 3회 실패 -> 정지 상태 유지, 관리자 알림 (SR-011)')
@@ -200,12 +385,18 @@ class DockingController:
             self.node.state_machine.transition(MissionState.ERROR)
             return
 
+        # 미세 스캔을 다 소진했다는 건 방향 자체가 틀렸다는 뜻이므로, 여기서만
+        # 처음부터(dock_turn_left_angle) 다시 돈다. 미세 스캔으로 이미 돌아간
+        # 각도만큼은 빼서, 매 시도마다 180도로 누적되지 않게 한다.
+        already = self.dock_nudge_angle * self.aruco_search_max
+        retry_angle = max(0.0, self.dock_turn_left_angle - already)
         self.node.get_logger().warn(
-            f'ArUco 마커 미검출 {elapsed:.1f}s -> 15도 회전 재탐색 '
-            f'({self.search_count}/{self.aruco_search_max})'
+            'ArUco 마커 재확인 %d회 실패 -> 좌로 %.0f도 더 회전 후 재시도 (%d/%d)'
+            % (self.aruco_search_max, retry_angle * 180.0 / math.pi,
+               self.attempt_count, self.docking_max_attempts)
         )
-        self.node.publish_cmd_vel(0.0, 0.26)
-        self.last_marker_stamp = self.node.get_clock().now()
+        self.node.publish_cmd_vel(0.0, 0.0)
+        self._begin_turn_left(retry_angle)
 
 
 class SafetyMonitor:
@@ -226,6 +417,13 @@ class SafetyMonitor:
         self._obstacle_retry_count = 0
         self._state_before_obstacle = None
 
+        # 후방 초음파 디바운스용
+        self.rear_confirm_n = node.get_parameter('rear_obstacle_confirm_count').value
+        self.rear_clear_n = node.get_parameter('rear_clear_confirm_count').value
+        self._rear_buf = deque(maxlen=5)
+        self._rear_obstacle_streak = 0
+        self._rear_clear_streak = 0
+
         self.person_wait_retry_max = node.get_parameter('person_wait_retry_max').value
         self._person_active = False
         self._person_retry_count = 0
@@ -241,32 +439,84 @@ class SafetyMonitor:
         MissionState.GUIDING, MissionState.RETURNING, MissionState.PERSON_WAIT,
     )
 
+    # 도킹 중에는 후방 장애물 판정을 하지 않는다.
+    # 도킹은 "충전 스테이션 벽에 일부러 붙는" 동작이라, 20cm 안으로 들어가는
+    # 것이 정상이다. 여기서 정지를 걸면 도킹 자체가 원천적으로 불가능해진다.
+    OBSTACLE_IGNORE_STATES = (
+        MissionState.DOCKING, MissionState.DOCKED,
+    )
+
     def handle_rear_ir(self, msg: Float32):
-        # 실제 후방 센서는 HC-SR04 초음파(/com_sensors/rear_distance, cm 단위) -
-        # 예전엔 /rear_ir(Range, m)를 구독하도록 돼 있었는데 그 토픽을 발행하는
-        # 코드가 프로젝트 어디에도 없어서 OBSTACLE_STOP이 한 번도 실제로 동작한
-        # 적이 없었음(2026-08-06 문서 검토 중 발견, 실물 주행 여러 번 했는데도
-        # 몰랐던 버그). 아두이노가 echo 타임아웃(약 5m 이상 미검출) 시 -1.0을
-        # 보내는데 이건 "장애물 없음"으로 처리해야 함(그냥 비교하면 음수라 항상
-        # 장애물로 오탐).
+        """후방 초음파(/com_sensors/rear_distance, cm) 처리.
+
+        아두이노는 echo 타임아웃 시 -1.0을 보낸다. 이건 "멀어서 안 잡힘"이므로
+        장애물 없음으로 처리해야 한다(음수를 그냥 비교하면 항상 장애물로 오탐).
+
+        2026-08-18: 초음파 발행 주기를 2초 -> 100ms 로 바꾼 뒤 주행이 망가졌다.
+        원인은 필터가 없었던 것. 초음파는 원래 가끔 완전히 튄 값을 하나씩 섞어
+        보내는데, 2초에 한 번 올 때는 그 확률이 낮아 티가 안 났다. 10Hz가 되자
+        튄 값 하나가 곧바로 OBSTACLE_STOP -> Nav2 goal 취소 -> 복구 동작 ->
+        해제 -> 재시도 를 초당 몇 번씩 반복시켰고, 그 사이 retry_count도 같이
+        소진되면서 로봇이 엉뚱한 방향으로 가거나 벽에 붙었다.
+
+        그래서 두 겹으로 막는다:
+          (1) 중앙값 필터 - 튄 값 하나는 통째로 무시된다(평균은 끌려감)
+          (2) 연속 확인 - N회 연속 같은 판정이 나와야 상태를 바꾼다
+        """
+        # 도킹 중에는 아예 개입하지 않는다
+        if self.node.state_machine.state in self.OBSTACLE_IGNORE_STATES:
+            self._rear_buf.clear()
+            self._rear_obstacle_streak = 0
+            self._rear_clear_streak = 0
+            return
+
         distance_cm = msg.data
-        if distance_cm < 0:
-            obstacle_present = False
+        # -1.0(미검출)은 "아주 멀다"로 환산해 버퍼에 넣는다. 버리면 허공에서
+        # 버퍼가 안 차서 판정 자체가 멈춘다.
+        if distance_cm < 0 or distance_cm > 400.0:
+            self._rear_buf.append(float('inf'))
+        else:
+            self._rear_buf.append(distance_cm / 100.0)
+
+        if len(self._rear_buf) < 3:
+            return
+
+        finite = [v for v in self._rear_buf if v != float('inf')]
+        # 유효값이 과반이 안 되면 "장애물 없음"으로 본다
+        if len(finite) * 2 <= len(self._rear_buf):
             distance_m = float('inf')
         else:
-            distance_m = distance_cm / 100.0
-            obstacle_present = distance_m <= self.obstacle_stop_distance
+            ordered = sorted(finite)
+            distance_m = ordered[len(ordered) // 2]
 
-        # 즉시 정지는 상태와 무관하게 항상 적용 (안전 최우선)
-        if obstacle_present:
-            self.node.publish_cmd_vel(0.0, 0.0)
+        obstacle_now = distance_m <= self.obstacle_stop_distance
+
+        if obstacle_now:
+            self._rear_obstacle_streak += 1
+            self._rear_clear_streak = 0
+        else:
+            self._rear_clear_streak += 1
+            self._rear_obstacle_streak = 0
 
         is_nav_driven = self.node.state_machine.state in self.NAV_DRIVEN_STATES
 
-        if obstacle_present and not self._obstacle_active and is_nav_driven:
-            self._on_obstacle_detected(distance_m)
-        elif not obstacle_present and self._obstacle_active:
+        if (not self._obstacle_active
+                and self._rear_obstacle_streak >= self.rear_confirm_n):
+            # 확정된 시점에만 정지를 건다. 예전엔 매 콜백마다 무조건 정지를
+            # 발행해서, 튄 값 하나에도 Nav2 명령을 10Hz로 덮어쓰고 있었다.
+            self.node.publish_cmd_vel(0.0, 0.0)
+            if is_nav_driven:
+                self._on_obstacle_detected(distance_m)
+            return
+
+        if (self._obstacle_active
+                and self._rear_clear_streak >= self.rear_clear_n):
             self._on_obstacle_cleared()
+            return
+
+        # 장애물이 확정된 상태가 유지되는 동안에는 계속 정지를 유지한다
+        if self._obstacle_active and obstacle_now:
+            self.node.publish_cmd_vel(0.0, 0.0)
 
     def _on_obstacle_detected(self, distance: float):
         self._obstacle_active = True
@@ -446,6 +696,12 @@ class ServiceManagerNode(Node):
 
         self.declare_parameter('battery_return_threshold', 20)
         self.declare_parameter('obstacle_stop_distance', 0.20)
+        # 2026-08-18: 초음파 발행이 0.5Hz -> 10Hz 로 바뀌면서, 튄 값 하나에도
+        # 즉시 OBSTACLE_STOP 이 걸려 Nav2 goal 이 취소되는 일이 초당 몇 번씩
+        # 발생했다(주행이 엉뚱한 방향으로 가고 벽에 붙는 증상의 원인).
+        # 연속 N회 확인을 통과해야만 상태를 바꾼다.
+        self.declare_parameter('rear_obstacle_confirm_count', 3)
+        self.declare_parameter('rear_clear_confirm_count', 5)
         self.declare_parameter('obstacle_search_max', 2)
         # 장애물(obstacle_search_max=2)보다 넉넉하게 잡음 - 사람은 장애물과 달리
         # 스스로 비켜줄 것으로 기대되는 일반적인 상황이라 더 여러 번 대기-재개를
@@ -465,6 +721,21 @@ class ServiceManagerNode(Node):
         self.declare_parameter('xy_goal_tolerance', 0.03)
         self.declare_parameter('nav_retry_max', 3)
         self.declare_parameter('dock_marker_id', 29)
+        # 2026-08-18: 360도 탐색 -> 좌 90도 고정 회전으로 변경하며 추가된 값들
+        # 2026-08-18 실측: 정확히 90도(1.5708)로 돌면 마커가 화각 경계에 걸려
+        # 인식이 안 됐다. 5도 더 돌리면 화각 안으로 확실히 들어온다.
+        # (오도메트리 각도 오차 + 카메라 장착 각도 오차가 합쳐진 결과로 보임)
+        self.declare_parameter('dock_turn_left_angle', 1.6581)   # rad (95도)
+        # 회전 후에도 못 찾으면 이 각도씩 "돌고-멈추고-보고"를 반복한다.
+        self.declare_parameter('dock_nudge_angle', 0.1222)       # rad (7도)
+        self.declare_parameter('dock_turn_speed', 0.35)          # rad/s
+        self.declare_parameter('dock_turn_tolerance', 0.035)     # rad (약 2도)
+        self.declare_parameter('dock_settle_time', 1.0)          # s (예비)
+        # 정지 시각 + 이 여유 이후에 '촬영된' 프레임만 신뢰한다. 카메라 파이프라인
+        # 지연(Pi4에서 수백 ms)만큼 잡아줘야 회전 중 찍힌 낡은 값에 안 속는다.
+        self.declare_parameter('dock_stale_margin', 0.3)         # s
+        self.declare_parameter('dock_k_yaw', 0.5)                # 반대로 돌면 -0.5
+        self.declare_parameter('dock_use_yaw_term', True)
         self.declare_parameter('docking_waypoint_id', 'docking')
         self.declare_parameter('startup_ready_delay', 3.0)
 
@@ -500,6 +771,13 @@ class ServiceManagerNode(Node):
         self.aruco_marker_sub = self.create_subscription(
             ArucoMarker, '/aruco_marker', self.on_aruco_marker, 10
         )
+        # 2026-08-18: 도킹 좌회전 90도를 정확히 돌기 위해 오도메트리가 필요하다.
+        # 시간 기반(초 x 각속도)으로 돌면 배터리 전압/바닥 마찰에 따라 실제 각도가
+        # 10도 이상 어긋나서, 회전 후 마커가 화각 밖으로 나가는 일이 생긴다.
+        self.odom_yaw = None
+        self.odom_sub = self.create_subscription(
+            Odometry, '/odom', self.on_odom, 10
+        )
         # serial_bridge_node(com_sensors)가 BEST_EFFORT로 발행하므로 QoS를 맞춰야
         # 실제로 메시지가 전달됨(기본 RELIABLE로 구독하면 QoS 불일치로 조용히 안 옴 -
         # 오늘 세션에서 여러 번 겪은 것과 같은 패턴).
@@ -527,6 +805,7 @@ class ServiceManagerNode(Node):
         self._nav_timeout_timer = None
 
         self.state_timer = self.create_timer(0.2, self.on_state_timer)
+        self.docking_timer = self.create_timer(0.05, self.on_docking_timer)
         self.battery_timer = self.create_timer(1.0, self.on_battery_timer)
         # 늦게 켜진 status 노드도 최신 상태를 받을 수 있도록 1초마다 재발행
         self.mission_state_timer = self.create_timer(1.0, self.on_mission_state_timer)
@@ -540,7 +819,7 @@ class ServiceManagerNode(Node):
         self._ready_timer = self.create_timer(self.startup_ready_delay, self._on_ready_timer)
 
     def _on_ready_timer(self):
-        self._ready_timer.cancel()
+        self.destroy_timer(self._ready_timer)
         self._ready_timer = None
         if self.state_machine.state == MissionState.LOCALIZING:
             self.state_machine.transition(MissionState.READY)
@@ -552,7 +831,11 @@ class ServiceManagerNode(Node):
 
     def cancel_hold_timer(self):
         if self._hold_timer is not None:
-            self._hold_timer.cancel()
+            # cancel()만 하면 콜백만 멈추고 타이머 객체는 노드에 계속 등록된 채로
+            # 남는다(누수). destroy_timer()로 완전히 제거해야 한다. 웨이포인트/
+            # 재시도/도착·도킹 대기마다 새 타이머가 생성되므로, 장시간 운영하면
+            # 죽은 타이머가 계속 쌓여 executor wait-set이 커진다.
+            self.destroy_timer(self._hold_timer)
             self._hold_timer = None
 
     def on_arrival_timeout(self):
@@ -566,6 +849,11 @@ class ServiceManagerNode(Node):
         self.cancel_hold_timer()
         if self.state_machine.state == MissionState.DOCKED:
             self.get_logger().info(f'DOCKED {self.docked_wait}s 경과 -> READY 복귀')
+            # docked_wait(2초)만으로는 실제 완충 여부를 보장 못 하므로, 다음
+            # check_battery 호출이 저배터리를 새로 감지해 RETURNING을 다시
+            # 걸 수 있도록 플래그를 리셋한다. 안 하면 도킹 직후 배터리가 여전히
+            # 임계값 이하인 채로 새 임무가 시작돼도 재무장이 안 됐다.
+            self.safety_monitor.battery_return_triggered = False
             self.state_machine.transition(MissionState.READY)
             self.publish_tts('mission_complete')
 
@@ -591,6 +879,18 @@ class ServiceManagerNode(Node):
         if self.state_machine.state != MissionState.READY:
             response.success = False
             response.message = f'현재 상태({self.state_machine.state.name})에서는 임무를 시작할 수 없습니다'
+            self.get_logger().warn(response.message)
+            return response
+
+        # 배터리 복귀 임계값 이하에서는 새 임무를 시작하지 않는다. battery_return_triggered
+        # 플래그만 믿으면, 도킹 후 짧은 docked_wait 안에 완충이 안 된 상태로 임무가
+        # 시작될 때 재무장 타이밍에 따라 저배터리 상태로 계속 주행할 수 있었다.
+        if self.safety_monitor.last_battery_percent <= self.safety_monitor.battery_return_threshold:
+            response.success = False
+            response.message = (
+                f'배터리 부족({self.safety_monitor.last_battery_percent:.0f}% <= '
+                f'{self.safety_monitor.battery_return_threshold}%) - 충전 후 이용 가능'
+            )
             self.get_logger().warn(response.message)
             return response
 
@@ -621,9 +921,21 @@ class ServiceManagerNode(Node):
         response.message = '임무를 취소합니다'
         return response
 
+    def on_odom(self, msg: Odometry):
+        self.odom_yaw = _odom_yaw(msg.pose.pose.orientation)
+
     def on_aruco_marker(self, msg: ArucoMarker):
         if self.state_machine.state == MissionState.DOCKING:
             self.docking_controller.on_aruco_marker(msg)
+
+    def on_docking_timer(self):
+        """도킹 회전 제어 전용 20Hz 루프.
+
+        state_timer(0.2초=5Hz)로 회전을 돌리면 한 주기에 4도씩 건너뛰어서
+        허용오차 2도를 그냥 지나쳐 버린다. 회전 제어만 따로 빠르게 돌린다.
+        """
+        if self.state_machine.state == MissionState.DOCKING:
+            self.docking_controller.update()
 
     def on_rear_ir(self, msg: Float32):
         self.safety_monitor.handle_rear_ir(msg)
@@ -701,7 +1013,15 @@ class ServiceManagerNode(Node):
             self.get_logger().debug('만료된 nav goal 응답 무시 (이미 새 목표로 대체됨)')
             return
 
-        goal_handle = future.result()
+        try:
+            goal_handle = future.result()
+        except Exception as e:
+            # 액션 서버가 도중에 죽거나(bt_navigator 재시작 등) DDS 전송 오류가 나면
+            # future가 예외로 끝난다. 안 잡으면 executor 콜백 안에서 그대로 터져
+            # rclpy.spin()까지 죽일 수 있다.
+            self.get_logger().error(f'Nav2 goal 응답 처리 중 예외: {e}')
+            self.state_machine.transition(MissionState.ERROR)
+            return
         if not goal_handle.accepted:
             self.get_logger().warn('Nav2 goal이 거부됨')
             self.state_machine.transition(MissionState.ERROR)
@@ -728,7 +1048,12 @@ class ServiceManagerNode(Node):
             return
 
         self._cancel_nav_timeout_timer()
-        result = future.result()
+        try:
+            result = future.result()
+        except Exception as e:
+            self.get_logger().error(f'Nav2 goal 결과 처리 중 예외: {e}')
+            self._handle_nav_failure()
+            return
         status = result.status
 
         if status == 4:
@@ -749,7 +1074,7 @@ class ServiceManagerNode(Node):
             return
 
         if wp_id and wp_id == self.waypoint_sequencer.destination_id:
-            self.get_logger().info('목적지 도착 -> ARRIVED (ArUco 검증은 8/3~ 예정)')
+            self.get_logger().info('목적지 도착 -> ARRIVED')
             self.state_machine.transition(MissionState.ARRIVED)
             self.publish_tts('arrived')
             return
@@ -795,7 +1120,7 @@ class ServiceManagerNode(Node):
 
     def _cancel_nav_timeout_timer(self):
         if self._nav_timeout_timer is not None:
-            self._nav_timeout_timer.cancel()
+            self.destroy_timer(self._nav_timeout_timer)  # cancel()만으론 누수 (위 cancel_hold_timer 참고)
             self._nav_timeout_timer = None
 
     def _on_nav_timeout(self):
@@ -808,6 +1133,13 @@ class ServiceManagerNode(Node):
         if self._nav_goal_handle is not None:
             self._nav_goal_handle.cancel_goal_async()
             self._nav_goal_handle = None
+            # 세대를 올려 이 goal의 accept/result 콜백이 뒤늦게 도착해도 무시되게
+            # 한다. 안 그러면 장애물/사람 감지로 여기서 취소한 직후 도착하는
+            # CANCELED 결과가 "주행 실패"로 오인되어 _handle_nav_failure()가 같은
+            # 목표를 재전송해버린다 - PERSON_WAIT 중에도 로봇이 다시 움직이는
+            # 버그였다 (2026-08-18 코드 리뷰에서 발견, 재시도 경쟁상태 방지용
+            # 세대 검사가 이 취소 경로에는 빠져있었음).
+            self._nav_goal_generation += 1
 
     def publish_state_code(self, state: MissionState):
         code = self.STATE_CODE_MAP.get(state)
@@ -857,7 +1189,12 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # 2026-08-18: SIGINT로 정상 종료될 때 rclpy 시그널 핸들러가 이미 컨텍스트를
+        # 닫아둔 상태라, 여기서 또 shutdown하면 RCLError가 터져 exit code 1로 끝난다.
+        # PM2는 그걸 '크래시'로 세서 재시작 카운터를 소진시키고 결국 스택 전체를
+        # 내려버린다(8/18 시험주행 후 8개 노드 전부 stopped 된 직접 원인).
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

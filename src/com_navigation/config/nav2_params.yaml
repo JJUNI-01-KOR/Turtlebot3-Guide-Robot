@@ -29,9 +29,13 @@ amcl:
     # 정상 운영 시 기본값. **로봇을 다른 곳에 두고 기동하면 이 좌표부터 실제 위치로
     # 갱신할 것** - 안 그러면 AMCL이 엉뚱한 위치를 확신한 채로 시작함.
     set_initial_pose: true
+    # 2026-08-18: 기존 값(1.079, 0.901)은 지도상 벽에서 10cm 거리(robot_radius=0.1m)라
+    # 출발점이 lethal 셀로 잡혀 Nav2 planner가 경로 계산 자체를 거부했다
+    # (GridBased: failed to create plan -> 모든 목적지 status=6 ABORTED).
+    # waypoints.yaml의 docking 좌표(벽에서 1.0m 여유)로 맞춤.
     initial_pose:
-      x: 1.0792808532714844
-      y: 0.901103115081787
+      x: 0.7352875471115112
+      y: -0.006671243347227573
       z: 0.0
       yaw: 0.0
     alpha1: 0.2
@@ -220,6 +224,7 @@ local_costmap:
       height: 3
       resolution: 0.05
       robot_radius: 0.1
+      transform_tolerance: 1.0  # scan/TF 355203200354235264353260215 354247200354227260354234274353241234 354212244354272224354235264 353223234353236255353220230353212224 353254270354240234 355232214355224274(2026-08-14)
       plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -277,6 +282,7 @@ global_costmap:
       # False로 정정.
       use_sim_time: False
       robot_radius: 0.1
+      transform_tolerance: 1.0  # scan/TF 355203200354235264353260215 354247200354227260354234274353241234 354212244354272224354235264 353223234353236255353220230353212224 353254270354240234 355232214355224274(2026-08-14)
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "voxel_layer", "inflation_layer"]

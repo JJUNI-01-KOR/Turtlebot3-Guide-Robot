@@ -19,7 +19,7 @@ DDS-001 2.2절 status 노드.
 
 import math
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 
 import rclpy
 from rclpy.node import Node
@@ -140,8 +140,12 @@ class StatusNode(Node):
             if wp_filter and rec.waypoint_id != wp_filter:
                 continue
             if date_filter:
-                rec_date = datetime.fromtimestamp(
-                    rec.stamp.sec, tz=timezone.utc).strftime('%Y-%m-%d')
+                # 2026-08-18 코드 리뷰: 여기는 UTC로 날짜를 계산하는데 GUI(main_window.py
+                # _on_log_result)는 같은 타임스탬프를 로컬시간(KST)으로 그냥 표시한다.
+                # KST는 UTC+9라서 자정 근처(로컬 00~09시) 로그는 필터링 기준 날짜가
+                # 화면에 보이는 날짜와 하루 어긋난다. GUI 쪽을 UTC로 바꾸는 것보다
+                # 로컬시간으로 맞추는 게 사용자가 실제로 입력하는 날짜와 일치한다.
+                rec_date = datetime.fromtimestamp(rec.stamp.sec).strftime('%Y-%m-%d')
                 if rec_date != date_filter:
                     continue
             results.append(rec)
@@ -163,7 +167,12 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # 2026-08-18: SIGINT로 정상 종료될 때 rclpy 시그널 핸들러가 이미 컨텍스트를
+        # 닫아둔 상태라, 여기서 또 shutdown하면 RCLError가 터져 exit code 1로 끝난다.
+        # PM2는 그걸 '크래시'로 세서 재시작 카운터를 소진시키고 결국 스택 전체를
+        # 내려버린다(8/18 시험주행 후 8개 노드 전부 stopped 된 직접 원인).
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -104,10 +104,17 @@ class VoiceNode(Node):
             self._current_item = None
 
     def _apply_volume(self):
+        # 2026-08-18 코드 리뷰: subprocess.run(...)은 amixer가 끝날 때까지 최대
+        # 2초간 이 콜백(=노드 전체, 단일스레드)을 막는다. _pump_queue가 재생마다
+        # 이 함수를 호출하므로, USB 오디오 동글이 불안정해서 amixer가 같이
+        # 멈칫거리면 그 2초 동안 재생 큐 전체가 멎는다 - 파일 상단 설계 의도인
+        # "Popen의 비동기 특성 유지"와 정면으로 모순됐다. 반환코드는 원래도
+        # 확인 안 했으므로(예외만 처리) aplay와 동일하게 Popen으로 바꿔도
+        # 동작은 그대로다.
         try:
-            subprocess.run(
+            subprocess.Popen(
                 ['amixer', 'sset', 'PCM', f'{self.volume}%'],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
         except Exception as e:
             self.get_logger().warn(f'볼륨 설정 실패: {e} (재생은 계속 시도)')
@@ -122,7 +129,12 @@ def main():
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # 2026-08-18: SIGINT로 정상 종료될 때 rclpy 시그널 핸들러가 이미 컨텍스트를
+        # 닫아둔 상태라, 여기서 또 shutdown하면 RCLError가 터져 exit code 1로 끝난다.
+        # PM2는 그걸 '크래시'로 세서 재시작 카운터를 소진시키고 결국 스택 전체를
+        # 내려버린다(8/18 시험주행 후 8개 노드 전부 stopped 된 직접 원인).
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

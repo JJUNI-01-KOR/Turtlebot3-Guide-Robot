@@ -41,7 +41,6 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import PoseStamped
 
-# TODO: 실제 com_interfaces 패키지명/메시지명과 다르면 여기만 수정
 from com_interfaces.msg import ArucoMarker, SystemError
 
 
@@ -336,6 +335,18 @@ class ArucoNode(Node):
         if self._last_frame_time is None or \
            (time.monotonic() - self._last_frame_time) > self.camera_timeout:
             self._publish_no_detection()
+            # 2026-08-18 코드 리뷰: /aruco_marker는 -1로 리셋하면서 /person_detected는
+            # 손 안 대서 카메라가 죽기 직전 마지막 값이 그대로 고정돼있었다. 사람이
+            # 있는 상태에서 카메라가 죽으면 PERSON_WAIT에 영원히 갇히는 것도 문제지만,
+            # 반대로 없는 상태에서 죽으면 그 사이 사람이 다가와도 못 알아채고 그대로
+            # 주행하는 게 더 위험하다 - 카메라가 안 보이는 동안은 "사람 있음"으로
+            # 안전 쪽으로 고정한다(fail-safe). 단, DOCKING 중엔 기존과 동일하게
+            # /person_detected를 아예 발행하지 않는다 - service_manager의
+            # handle_person_detected는 상태와 무관하게 person_present=True면 즉시
+            # /cmd_vel을 0으로 눌러버려서, 여기서 발행하면 도킹 접근이 매번 끊긴다
+            # (아래 person 체크 스킵 로직과 동일한 이유, service_manager_node.py 주석 참고).
+            if self._mission_state != 'DOCKING':
+                self.publish_person(True)
             if not self._error_reported:
                 self._publish_camera_timeout_error()
                 self._error_reported = True
@@ -381,7 +392,8 @@ class ArucoNode(Node):
                 break
 
         marker_id = ids_flat[idx]
-        pose, lateral_error, distance_error = self.detector.compute_pose_error([corners[idx]])
+        pose, lateral_error, distance_error = \
+            self.detector.compute_pose_error([corners[idx]])
 
         if pose is None:
             self._publish_no_detection()
@@ -433,7 +445,12 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # 2026-08-18: SIGINT로 정상 종료될 때 rclpy 시그널 핸들러가 이미 컨텍스트를
+        # 닫아둔 상태라, 여기서 또 shutdown하면 RCLError가 터져 exit code 1로 끝난다.
+        # PM2는 그걸 '크래시'로 세서 재시작 카운터를 소진시키고 결국 스택 전체를
+        # 내려버린다(8/18 시험주행 후 8개 노드 전부 stopped 된 직접 원인).
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

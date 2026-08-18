@@ -1,0 +1,61 @@
+
+com_auto_dock_node:
+  ros__parameters:
+    # ═══ 1단계: 도킹 지점 (Nav2) ═══
+    target_marker_id: 29
+    dock_approach_x: 0.0
+    dock_approach_y: 0.0
+    dock_approach_yaw: 0.0
+    map_frame: "map"
+    skip_navigation: true       # 첫 테스트는 true
+ 
+    # ═══ 2단계: 왼쪽 90도 회전 ═══
+    turn_left_angle: 1.5708
+    turn_speed: 0.4
+    turn_tolerance: 0.035
+ 
+    # ═══ 3단계: 마커 확인 ═══
+    # aruco detection_rate=5Hz 이므로 1.0초 미만으로 내리지 말 것
+    marker_timeout: 1.0
+    find_settle_time: 1.5
+    enable_fallback_sweep: true
+    sweep_angle: 0.436
+    sweep_speed: 0.25
+ 
+    # ═══ 4단계: 접근 (정렬 통합) ═══
+    k_lateral: 0.8
+    k_yaw: 0.5                  # 반대로 돌면 -0.5
+    use_yaw_term: true          # false면 기존 DockingController와 동일 동작
+    approach_speed: 0.06
+    max_angular: 0.4
+    near_max_angular: 0.2
+    near_distance: 0.4
+    min_dock_distance: 0.25     # 실측 필요
+ 
+    # ═══ 6단계: 초음파 후진 ═══
+    ultrasonic_topic: "/com_sensors/rear_distance"
+    rear_obstacle_topic: "/com_sensors/rear_obstacle"
+    ultrasonic_offset: 0.0      # 센서면 - 뒷범퍼 (실측)
+    ultrasonic_timeout: 1.5     # 아두이노 수정 후 기준. 미수정이면 3.0 이상
+    ultrasonic_min_valid: 0.02
+    ultrasonic_max_valid: 2.0
+    target_gap: 0.03
+    gap_tolerance: 0.005
+    reverse_speed: 0.04
+    reverse_min_speed: 0.015
+    k_reverse: 0.35
+    max_reverse_distance: 0.6
+ 
+    # ═══ 7단계: 음성 ═══
+    tts_topic: "/tts_request"
+    tts_text_key: "docked_arrive"   # audio/docked_arrive.wav
+    tts_sound_effect: ""
+ 
+    # ═══ 기타 ═══
+    publish_mission_state: true
+    timeout_turn_left: 20.0
+    timeout_find: 30.0
+    timeout_approach: 90.0
+    timeout_turn_180: 25.0
+    timeout_reverse: 60.0
+ 

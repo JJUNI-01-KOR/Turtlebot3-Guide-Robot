@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+
+# 작업 중 만든 백업 파일 (2026-08-18)
+*.bak
+*.bak.*

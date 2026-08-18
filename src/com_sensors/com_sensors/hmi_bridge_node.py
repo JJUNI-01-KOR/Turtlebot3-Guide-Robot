@@ -313,8 +313,17 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # destroy_node()는 시리얼 포트(fd)를 안 닫는다 - serial_bridge_node.py와
+        # 동일한 이유로 명시적으로 닫는다(2026-08-18 코드 리뷰).
+        if hasattr(node, 'ser') and node.ser.is_open:
+            node.ser.close()
         node.destroy_node()
-        rclpy.shutdown()
+        # 2026-08-18: SIGINT로 정상 종료될 때 rclpy 시그널 핸들러가 이미 컨텍스트를
+        # 닫아둔 상태라, 여기서 또 shutdown하면 RCLError가 터져 exit code 1로 끝난다.
+        # PM2는 그걸 '크래시'로 세서 재시작 카운터를 소진시키고 결국 스택 전체를
+        # 내려버린다(8/18 시험주행 후 8개 노드 전부 stopped 된 직접 원인).
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
