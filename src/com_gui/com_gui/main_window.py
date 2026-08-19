@@ -49,17 +49,20 @@ from .ros_worker import RosWorkerThread
 
 
 # 목적지 8곳 — ~/com_ws/src/com_navigation/config/waypoints.yaml 의
-# id 값을 그대로 사용한다 (2026-08-11 재확인: room7/room8도 is_destination: true로
+# id 값을 그대로 사용한다 (2026-08-19: room1~8 -> class1~5/info/office/meeting 으로
+# id 이름 변경. 좌표는 그대로이고 키 이름만 바뀐 것이라 표시 라벨은 유지했다.
 # 이미 등록되어 있어 추가함. 구 LECTURE1 등의 합성 코드는 폐기됨).
+# id 는 내부 키일 뿐 라벨 뜻과 1:1 대응이 아니다 (2026-08-19 확인):
+#   info -> 회의실, office -> 인포, meeting -> 상담실. 물리 위치는 이름 변경 전과 동일.
 DESTINATIONS = [
-    ('강의실1', 'room1'),
-    ('강의실2', 'room2'),
-    ('강의실3', 'room3'),
-    ('강의실4', 'room4'),
-    ('강의실5', 'room5'),
-    ('회의실', 'room6'),
-    ('인포', 'room7'),
-    ('상담실', 'room8'),
+    ('강의실1', 'class1'),
+    ('강의실2', 'class2'),
+    ('강의실3', 'class3'),
+    ('강의실4', 'class4'),
+    ('강의실5', 'class5'),
+    ('회의실', 'info'),
+    ('인포', 'office'),
+    ('상담실', 'meeting'),
 ]
 
 # 이 상태들에서는 임무 취소 버튼이 활성화 (HMI-001 5장)
@@ -76,6 +79,12 @@ MANUAL_ANGULAR_SPEED = 0.60    # rad/s
 
 MAX_ALARMS = 6
 MAX_TIMELINE = 40
+
+# SR-014 온도 이상 알림. 센서가 2초마다 값을 보내므로 임계치를 넘은 '순간'에만
+# 알람을 남기고, 다시 남기려면 해제 임계치 아래로 내려갔다 와야 한다(히스테리시스).
+# 안 그러면 알람 카드 6칸이 같은 온도 알람으로만 채워져 다른 이벤트가 밀려난다.
+TEMP_ALARM_ON = 35.0
+TEMP_ALARM_OFF = 34.0
 
 # ---- PM2 프로세스 관리 (임무 이력 타임라인 아래 빈 공간) ----
 # 라즈베리파이에서 `pm2 list`로 확인한 실제 프로세스 8개 (2026-08-14 확인).
@@ -149,10 +158,7 @@ class MainWindow(QMainWindow):
         self._last_flame_time = 0.0
         self._flame_on = False       # 현재 불꽃 감지 상태
         self._flame_was_on = False   # 직전 상태 (감지 '시작' 순간만 알람 남기려고)
-        self._temp_alarm_active = False  # 2026-08-18: 온도도 불꽃과 동일하게 임계치 넘는
-                                          # '시작' 순간만 알람 남김 (아래 temp_signal_handler/
-                                          # _on_env_data 참고) - 없으면 35도 근처에 머물 때
-                                          # 메시지 올 때마다 알람판을 계속 도배함
+        self._temp_alarm_on = False  # 온도 알람도 같은 이유로 에지에서만 남긴다
         self._pm2_process = None     # 실행 중인 QProcess 참조 (GC 방지 + 중복실행 방지)
 
         # ---- ROS 스레드 ----
@@ -646,16 +652,17 @@ class MainWindow(QMainWindow):
 
     def temp_signal_handler(self, celsius):
         self.temp_bar.set_value(celsius)
-        # SR-014: 35도 이상이면 이상 알림 (개별 토픽 경로에서도 동일 적용)
-        # 2026-08-18: 불꽃감지와 동일하게 임계치를 넘는 '시작' 순간에만 알람을
-        # 남긴다 - 디바운스가 없으면 35도 근처에 계속 머물 때 메시지 올 때마다
-        # (초당 여러 번일 수 있음) 알람판 6칸을 온도경고로 도배해버린다.
-        if celsius >= 35.0:
-            if not self._temp_alarm_active:
-                self._add_alarm(f'온도 임계치 초과 ({celsius:.1f}°C)', T.ACCENT_RED)
-            self._temp_alarm_active = True
-        else:
-            self._temp_alarm_active = False
+        self._check_temp_alarm(celsius)
+
+    def _check_temp_alarm(self, celsius):
+        """SR-014 온도 이상 알림. 임계치를 처음 넘은 순간에만 알람을 남긴다."""
+        if celsius >= TEMP_ALARM_ON and not self._temp_alarm_on:
+            self._temp_alarm_on = True
+            self._add_alarm(f'온도 임계치 초과 ({celsius:.1f}°C)', T.ACCENT_RED)
+            self._add_timeline(f'온도 임계치 초과 ({celsius:.1f}°C)', T.ACCENT_RED)
+        elif celsius < TEMP_ALARM_OFF and self._temp_alarm_on:
+            self._temp_alarm_on = False
+            self._add_timeline(f'온도 정상 복귀 ({celsius:.1f}°C)', T.ACCENT_GREEN)
 
     def humi_signal_handler(self, percent):
         self.humi_bar.set_value(percent)
@@ -696,13 +703,7 @@ class MainWindow(QMainWindow):
     def _on_env_data(self, temp, humi, lux):
         self.temp_bar.set_value(temp)
         self.humi_bar.set_value(humi)
-        # SR-014: 35도 이상이면 이상 알림 (temp_signal_handler와 같은 디바운스 플래그 공유)
-        if temp >= 35.0:
-            if not self._temp_alarm_active:
-                self._add_alarm(f'온도 임계치 초과 ({temp:.1f}°C)', T.ACCENT_RED)
-            self._temp_alarm_active = True
-        else:
-            self._temp_alarm_active = False
+        self._check_temp_alarm(temp)
 
     def _on_system_error(self, node_name, error_code, message, severity):
         color = (T.ACCENT_RED if severity >= 2

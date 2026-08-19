@@ -61,17 +61,21 @@ MCUFRIEND_kbv tft;
 // ---------------- 목적지 메뉴 (waypoints.yaml is_destination:true 와 동일 순서/id 유지) ----------------
 // 라벨은 한글로 표시한다. Adafruit_GFX 기본 폰트엔 한글 글리프가 없어서(하드웨어 제약 -
 // Uno 플래시로 완전한 Hangul 폰트를 올리는 건 비현실적), hangul_font.h의 20x20 비트맵
-// 글리프 8종(강/의/실/회/인/포/상/담)만 조합해서 그린다. 숫자는 기존 ASCII 폰트 재사용.
+// 글리프를 조합해서 그린다. 숫자는 기존 ASCII 폰트 재사용.
+// 2026-08-19: 주석에 "글리프 8종"이라 적혀 있었으나 실제로는 34종이다
+// (강의실회인포상담목적지선택다시누르면출발조이스틱으로취소도착환영합니).
+// id 는 내부 키일 뿐 라벨 뜻과 1:1 대응이 아니다: info->회의실, office->인포,
+// meeting->상담실. 물리 위치는 id 이름 변경 전과 동일하다.
 struct Destination { const char* id; uint8_t glyphs[3]; char digit; };
 const Destination DESTINATIONS[] = {
-  {"room1", {G_GANG, G_UI, G_SIL}, '1'},
-  {"room2", {G_GANG, G_UI, G_SIL}, '2'},
-  {"room3", {G_GANG, G_UI, G_SIL}, '3'},
-  {"room4", {G_GANG, G_UI, G_SIL}, '4'},
-  {"room5", {G_GANG, G_UI, G_SIL}, '5'},
-  {"room6", {G_HOE, G_UI, G_SIL}, 0},
-  {"room7", {G_IN, G_PO, G_NONE}, 0},
-  {"room8", {G_SANG, G_DAM, G_SIL}, 0},
+  {"class1", {G_GANG, G_UI, G_SIL}, '1'},
+  {"class2", {G_GANG, G_UI, G_SIL}, '2'},
+  {"class3", {G_GANG, G_UI, G_SIL}, '3'},
+  {"class4", {G_GANG, G_UI, G_SIL}, '4'},
+  {"class5", {G_GANG, G_UI, G_SIL}, '5'},
+  {"info", {G_HOE, G_UI, G_SIL}, 0},
+  {"office", {G_IN, G_PO, G_NONE}, 0},
+  {"meeting", {G_SANG, G_DAM, G_SIL}, 0},
 };
 const int NUM_DEST = sizeof(DESTINATIONS) / sizeof(DESTINATIONS[0]);
 

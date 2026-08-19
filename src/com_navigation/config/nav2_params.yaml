@@ -33,11 +33,13 @@ amcl:
     # 출발점이 lethal 셀로 잡혀 Nav2 planner가 경로 계산 자체를 거부했다
     # (GridBased: failed to create plan -> 모든 목적지 status=6 ABORTED).
     # waypoints.yaml의 docking 좌표(벽에서 1.0m 여유)로 맞춤.
+    # 2026-08-19: waypoints.yaml의 docking 좌표 재측정에 맞춰 갱신 (세 곳이 같은 값을
+    # 써야 한다: 여기, waypoints.yaml docking, auto_dock_params.yaml dock_approach_*).
     initial_pose:
-      x: 0.7352875471115112
-      y: -0.006671243347227573
+      x: 0.5326756643036313
+      y: 0.03834829532494814
       z: 0.0
-      yaw: 0.0
+      yaw: 1.4981870525
     alpha1: 0.2
     alpha2: 0.2
     alpha3: 0.2
@@ -224,8 +226,14 @@ local_costmap:
       height: 3
       resolution: 0.05
       robot_radius: 0.1
-      transform_tolerance: 1.0  # scan/TF 355203200354235264353260215 354247200354227260354234274353241234 354212244354272224354235264 353223234353236255353220230353212224 353254270354240234 355232214355224274(2026-08-14)
-      plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
+      transform_tolerance: 1.0  # scan/TF 타이밍 경합으로 costmap 갱신이 밀리던 것 완화 (2026-08-14).
+      # 2026-08-19: 진짜 원인이 부팅 시 시계 점프였을 가능성이 크다
+      # (com_launch/scripts/run_node.sh 주석 참고). 시계 대기를 넣었으니
+      # 0.2~0.3으로 되돌려도 되는지 재확인할 것 - 1.0초는 0.22m/s에서
+      # 22cm 위치 오차를 허용한다.
+      plugins: ["voxel_layer", "inflation_layer"]
+      # 2026-08-19: obstacle_layer 제거 - voxel_layer와 같은 /scan을 이중
+      # 처리하고 있었다. 표준 TB3 local_costmap은 voxel_layer만 쓴다.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 1.0
@@ -282,10 +290,17 @@ global_costmap:
       # False로 정정.
       use_sim_time: False
       robot_radius: 0.1
-      transform_tolerance: 1.0  # scan/TF 355203200354235264353260215 354247200354227260354234274353241234 354212244354272224354235264 353223234353236255353220230353212224 353254270354240234 355232214355224274(2026-08-14)
+      transform_tolerance: 1.0  # scan/TF 타이밍 경합으로 costmap 갱신이 밀리던 것 완화 (2026-08-14).
+      # 2026-08-19: 진짜 원인이 부팅 시 시계 점프였을 가능성이 크다
+      # (com_launch/scripts/run_node.sh 주석 참고). 시계 대기를 넣었으니
+      # 0.2~0.3으로 되돌려도 되는지 재확인할 것 - 1.0초는 0.22m/s에서
+      # 22cm 위치 오차를 허용한다.
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "voxel_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # 2026-08-19: voxel_layer 제거. obstacle_layer와 같은 /scan을 두 번
+      # 처리하고 있었고(표준 TB3는 global에 voxel_layer를 안 넣는다), 28x15m
+      # 전역 코스트맵에 3D 복셀을 돌리는 건 2D 라이다 버거에서 순수 낭비다.
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True

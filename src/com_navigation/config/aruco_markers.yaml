@@ -7,7 +7,7 @@
 #                              ID 0~49까지만 지원하여 99는 생성/인식 자체가 불가능함
 # v1.2 (2026-08-05) : 강의실1~5/인포/상담실/회의실 마커(21~28) 제거, 도킹 마커(29)만 유지
 #                      사유: service_manager_node의 DockingController가 dock_marker_id(29)만
-#                      필터링해서 쓰고 있고, 목적지(room1~room6) 도착 판정은 Nav2가
+#                      필터링해서 쓰고 있고, 목적지(class1~info) 도착 판정은 Nav2가
 #                      waypoints.yaml 좌표 기준으로 하지 마커 인식과 무관 - 미사용 확인 후 정리
 #
 # 사전: DICT_4X4_50 | 마커 실제 크기: 10cm x 10cm (marker_size=0.10m, DDS-001 기준)
