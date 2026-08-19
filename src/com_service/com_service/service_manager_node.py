@@ -91,6 +91,24 @@ class WaypointSequencer:
         self.route_prefix_ids = data.get('trajectory_1', {}).get('waypoint_ids', [])
         self.route_return_ids = data.get('trajectory_2', {}).get('waypoint_ids', [])
 
+        # 2026-08-19: 두 키가 없어도 코드는 조용히 "직행"으로 동작해버리므로,
+        # 정의되지 않은 상태를 명시적으로 알린다. 실제로 way6~way16/docking2
+        # 경유점 11개가 정의돼 있는데 trajectory 키가 없어 한 번도 안 쓰이고 있었다.
+        unused = [
+            wp_id for wp_id in self.waypoints
+            if wp_id not in self.destination_ids
+            and wp_id != self.docking_waypoint_id
+            and wp_id not in self.route_prefix_ids
+            and wp_id not in self.route_return_ids
+        ]
+        if not self.route_prefix_ids and not self.route_return_ids:
+            self.node.get_logger().warn(
+                'waypoints.yaml에 trajectory_1/trajectory_2가 없어 도킹<->목적지를 '
+                f'단일 Nav2 goal로 직행합니다. 미사용 경유점 {len(unused)}개: {unused}'
+            )
+        elif unused:
+            self.node.get_logger().info(f'어느 경로에도 안 쓰이는 웨이포인트: {unused}')
+
         if self.docking_waypoint_id not in self.waypoints:
             self.node.get_logger().warn(
                 f"docking_waypoint_id='{self.docking_waypoint_id}' 이(가) "
@@ -181,6 +199,7 @@ class DockingController:
         self.k_yaw = node.get_parameter('dock_k_yaw').value
         self.use_yaw_term = node.get_parameter('dock_use_yaw_term').value
 
+        self.dock_target_distance = node.get_parameter('dock_target_distance').value
         self.lateral_tolerance = 0.02
         self.distance_tolerance = 0.03
 
@@ -322,20 +341,33 @@ class DockingController:
         # lateral 항만 쓰면 마커 '위치'로 커브를 그리며 갈 뿐이라, 도착했을 때
         # 마커를 비스듬히 보게 된다. yaw 항이 "마커 정면 직선 위로 올라타라"는
         # 성분을 더해줘서 전진하는 동안 두 오차가 같이 0으로 수렴한다.
+        range_error = self._range_error(marker)
         steer = self.k_lateral * lateral
         if self.use_yaw_term:
             steer += self.k_yaw * _marker_yaw(marker.pose.pose.orientation)
 
         angular_z = -steer
-        linear_x = self.k_distance * distance
+        linear_x = self.k_distance * range_error
 
         linear_x = max(-self.docking_speed_limit, min(self.docking_speed_limit, linear_x))
         angular_z = max(-0.3, min(0.3, angular_z))
         return linear_x, angular_z
 
+    def _range_error(self, marker: ArucoMarker) -> float:
+        """정지 목표 지점까지 남은 거리(m). +면 더 전진, -면 너무 붙은 것.
+
+        2026-08-19: ArucoMarker.distance_error는 이름과 달리 '오차'가 아니라
+        카메라에서 마커까지의 생거리다(aruco_node.compute_pose_error가 tvec[2]를
+        그대로 담음). 이 값을 그대로 제어 오차로 쓰면 목표 정지거리가 0이 되어
+        마커 3cm 앞까지 밀고 들어간다 - 10cm 마커는 그 훨씬 전에 화각을 벗어나
+        검출이 끊기므로 정렬 완료 판정에 도달할 수 없고, 로봇은 이미 도크에
+        밀착한 상태가 된다. 목표 정지거리를 빼서 진짜 오차로 만든다.
+        """
+        return marker.distance_error - self.dock_target_distance
+
     def _is_aligned(self, marker: ArucoMarker) -> bool:
         return (abs(marker.lateral_error) <= self.lateral_tolerance
-                and abs(marker.distance_error) <= self.distance_tolerance)
+                and abs(self._range_error(marker)) <= self.distance_tolerance)
 
     def _on_dock_success(self):
         self.active = False
@@ -410,24 +442,66 @@ class SafetyMonitor:
 
         self.battery_voltage_full = 12.6
         self.battery_voltage_empty = 9.0
+        # OpenCR이 배터리 미장착/USB 급전 상태에서 voltage=0.0을 그대로 발행하는 경우가
+        # 있다. 이걸 그냥 환산하면 0%가 되어 주행 중에 저전압 복귀가 오발동하므로,
+        # 물리적으로 있을 수 없는 값은 아예 무시한다(3S LiPo는 6V 아래로 안 떨어진다).
+        self.battery_voltage_min_valid = 6.0
+        # 전압이 초 단위로 흔들린다(실측: 같은 충전 상태에서 퍼센트가 86~90을 오감).
+        # 그대로 쓰면 (1) HMI/GUI 숫자가 계속 떨리고 (2) 주행 중 모터 부하로 순간
+        # 전압 강하가 생기면 저전압 복귀(SR-022)가 오발동한다. 지수이동평균으로
+        # 평활화한 값을 퍼센트 환산과 임계 판정에 함께 쓴다. (2026-08-19)
+        self.battery_voltage_filtered = None
+        self.battery_filter_alpha = 0.2
         self.last_battery_percent = 100.0
         self.battery_return_triggered = False
 
         self._obstacle_active = False
         self._obstacle_retry_count = 0
-        self._state_before_obstacle = None
 
-        # 후방 초음파 디바운스용
-        self.rear_confirm_n = node.get_parameter('rear_obstacle_confirm_count').value
-        self.rear_clear_n = node.get_parameter('rear_clear_confirm_count').value
+        # 후방 초음파 디바운스용.
+        # 2026-08-19: 08-18에 도입된 "N회 연속 확인"은 초음파가 10Hz로 온다는
+        # 전제였는데, 실측 결과 아두이노는 여전히 2초 주기(0.50Hz)로 보낸다
+        # (arduino/flaem_pir_dht11_jul31a.ino의 TELEMETRY_INTERVAL=2000).
+        # 그 상태에서 3회 연속을 요구하면 확정까지 6초가 걸려, 0.22m/s에서
+        # 1.3m를 더 가고 나서야 정지한다. 발행 주기가 바뀌어도 항상 옳도록
+        # 횟수가 아니라 "얼마나 오래 유지됐는가"로 판정한다.
+        self.rear_confirm_sec = node.get_parameter('rear_obstacle_confirm_sec').value
+        self.rear_clear_sec = node.get_parameter('rear_clear_confirm_sec').value
+        # 발행이 느릴 때 기준이 되는 수신 간격(s). 이보다 느리면 필터를 얕게 쓴다.
+        self.rear_sparse_interval = node.get_parameter('rear_sparse_interval').value
         self._rear_buf = deque(maxlen=5)
-        self._rear_obstacle_streak = 0
-        self._rear_clear_streak = 0
+        self._rear_stamp = None
+        self._rear_interval = None      # 수신 간격 EMA
+        self._obstacle_since = None
+        self._clear_since = None
 
         self.person_wait_retry_max = node.get_parameter('person_wait_retry_max').value
         self._person_active = False
         self._person_retry_count = 0
-        self._state_before_person = None
+
+        # 2026-08-19: 장애물/사람 두 정지 사유가 겹칠 수 있으므로 "정지 직전의 주행
+        # 상태"는 하나로 공유한다. 예전엔 두 핸들러가 각자 이전 상태를 저장/복원해서,
+        # PERSON_WAIT 중 장애물이 감지된 뒤 사람만 먼저 비켜나면 장애물이 그대로인데도
+        # _state_before_person(=GUIDING)으로 복귀하며 주행을 재개하는 버그가 있었다.
+        self._state_before_stop = None
+        # 래치와 별개로 "지금 이 순간" 센서 판정도 들고 있는다. 임무 시작 시점에 이미
+        # 사람/장애물이 있는지 보려면 에지가 아니라 현재값이 필요하다(blocking_reason).
+        self._last_person_present = False
+        self._last_obstacle_present = False
+
+    def _rear_is_sparse(self) -> bool:
+        """초음파가 드물게 오는 상태인가 (중앙값 필터를 얕게 써야 하는가).
+
+        2026-08-19: 08-18에 들어온 중앙값 필터(창 5)는 초음파가 10Hz라는 전제였다.
+        실측은 0.50Hz(2초 주기)라, 창 5짜리 중앙값이 뒤집히는 데만 3개(6초)가
+        걸리고 거기에 확정 대기까지 더해져 장애물 정지가 8초나 늦었다
+        (0.22m/s에서 1.7m). 08-18 주석도 "2초에 한 번 올 때는 튄 값 확률이 낮아
+        티가 안 났다"고 적고 있다 - 즉 느릴 때는 깊은 필터가 이득이 아니라 손해다.
+        그래서 수신 간격을 재서, 느리면 창 3 + 즉시 확정으로 전환한다.
+        빠른 펌웨어로 바꾸면 자동으로 창 5 + 시간 확정으로 되돌아간다.
+        """
+        return (self._rear_interval is not None
+                and self._rear_interval > self.rear_sparse_interval)
 
     def reset_obstacle_retries(self):
         self._obstacle_retry_count = 0
@@ -435,9 +509,44 @@ class SafetyMonitor:
     def reset_person_retries(self):
         self._person_retry_count = 0
 
+    def reset_stop_conditions(self):
+        """정지 사유 래치를 전부 해제한다 (임무 취소 등으로 흐름이 끊길 때).
+
+        2026-08-19 실기체 실측: cancel_mission이 상태머신만 READY로 되돌리고
+        _person_active를 True로 남겨두는 바람에, 사람이 앞에 그대로 서 있는데도
+        다음 임무에서 `person_present and not self._person_active`가 False가 되어
+        PERSON_WAIT가 한 번도 안 걸렸다. 로봇이 사람 앞에서 그냥 출발해버린다.
+        """
+        self._obstacle_active = False
+        self._person_active = False
+        self._state_before_stop = None
+        # 2026-08-19: _rear_buf(중앙값 필터용 센서 이력)는 일부러 안 비운다.
+        # 초음파가 0.5Hz라 버퍼를 비우면 다시 3개가 찰 때까지 6초 동안 장애물
+        # 감지가 통째로 멎는다(취소 직후가 가장 위험한 구간인데 그때 눈이 감긴다).
+        # 래치와 연속 판정만 초기화하면 충분하다.
+        self._obstacle_since = None
+        self._clear_since = None
+
+    def blocking_reason(self):
+        """지금 임무를 시작하면 안 되는 사유. 없으면 None."""
+        if self._last_obstacle_present:
+            return '후방에 장애물이 감지되어 있습니다'
+        if self._last_person_present:
+            return '전방에 사람이 감지되어 있습니다'
+        return None
+
+    # Nav2가 주행을 담당하는(=장애물/사람 감지가 의미 있는) 상태. 정지 상태 두 개도
+    # 포함해야 "정지 중에 다른 사유가 추가로 발생"하는 경우를 놓치지 않는다.
     NAV_DRIVEN_STATES = (
-        MissionState.GUIDING, MissionState.RETURNING, MissionState.PERSON_WAIT,
+        MissionState.GUIDING, MissionState.RETURNING,
+        MissionState.PERSON_WAIT, MissionState.OBSTACLE_STOP,
     )
+
+    # 실제로 주행 중인 상태. nav goal 결과를 처리해도 되는 상태이기도 하다 -
+    # NAV_DRIVEN_STATES를 그대로 쓰면, 사람 감지로 취소한 goal의 CANCELED 결과가
+    # PERSON_WAIT에서 _handle_nav_failure()로 흘러들어가 재시도 goal을 보내면서
+    # 사람이 아직 앞에 있는데 주행이 재개된다(2026-08-19 실기체 실측).
+    DRIVING_STATES = (MissionState.GUIDING, MissionState.RETURNING)
 
     # 도킹 중에는 후방 장애물 판정을 하지 않는다.
     # 도킹은 "충전 스테이션 벽에 일부러 붙는" 동작이라, 20cm 안으로 들어가는
@@ -466,9 +575,17 @@ class SafetyMonitor:
         # 도킹 중에는 아예 개입하지 않는다
         if self.node.state_machine.state in self.OBSTACLE_IGNORE_STATES:
             self._rear_buf.clear()
-            self._rear_obstacle_streak = 0
-            self._rear_clear_streak = 0
+            self._obstacle_since = None
+            self._clear_since = None
             return
+
+        # 수신 간격 측정 (필터 깊이를 발행률에 맞추기 위함)
+        _now = self.node.get_clock().now()
+        if self._rear_stamp is not None:
+            _dt = (_now - self._rear_stamp).nanoseconds / 1e9
+            self._rear_interval = _dt if self._rear_interval is None else \
+                0.3 * _dt + 0.7 * self._rear_interval
+        self._rear_stamp = _now
 
         distance_cm = msg.data
         # -1.0(미검출)은 "아주 멀다"로 환산해 버퍼에 넣는다. 버리면 허공에서
@@ -481,27 +598,43 @@ class SafetyMonitor:
         if len(self._rear_buf) < 3:
             return
 
-        finite = [v for v in self._rear_buf if v != float('inf')]
+        # 느리게 들어올 때는 최근 3개만 본다(위 _rear_is_sparse 주석 참고).
+        window = list(self._rear_buf)[-3:] if self._rear_is_sparse() else list(self._rear_buf)
+        finite = [v for v in window if v != float('inf')]
         # 유효값이 과반이 안 되면 "장애물 없음"으로 본다
-        if len(finite) * 2 <= len(self._rear_buf):
+        if len(finite) * 2 <= len(window):
             distance_m = float('inf')
         else:
             ordered = sorted(finite)
             distance_m = ordered[len(ordered) // 2]
 
         obstacle_now = distance_m <= self.obstacle_stop_distance
+        self._last_obstacle_present = obstacle_now
 
+        now = self.node.get_clock().now()
         if obstacle_now:
-            self._rear_obstacle_streak += 1
-            self._rear_clear_streak = 0
+            if self._obstacle_since is None:
+                self._obstacle_since = now
+            self._clear_since = None
         else:
-            self._rear_clear_streak += 1
-            self._rear_obstacle_streak = 0
+            if self._clear_since is None:
+                self._clear_since = now
+            self._obstacle_since = None
+
+        # 희소 발행일 때는 중앙값 필터가 이미 튄 값을 걸러주므로 추가 확정
+        # 대기를 두지 않는다(대기 1회가 곧 2초 = 44cm 추가 주행이라 손해가 크다).
+        confirm_sec = 0.0 if self._rear_is_sparse() else self.rear_confirm_sec
+        clear_sec = self.rear_clear_sec
+
+        def _held(since, need_sec):
+            if since is None:
+                return False
+            return (now - since).nanoseconds / 1e9 >= need_sec
 
         is_nav_driven = self.node.state_machine.state in self.NAV_DRIVEN_STATES
 
         if (not self._obstacle_active
-                and self._rear_obstacle_streak >= self.rear_confirm_n):
+                and _held(self._obstacle_since, confirm_sec)):
             # 확정된 시점에만 정지를 건다. 예전엔 매 콜백마다 무조건 정지를
             # 발행해서, 튄 값 하나에도 Nav2 명령을 10Hz로 덮어쓰고 있었다.
             self.node.publish_cmd_vel(0.0, 0.0)
@@ -510,7 +643,7 @@ class SafetyMonitor:
             return
 
         if (self._obstacle_active
-                and self._rear_clear_streak >= self.rear_clear_n):
+                and _held(self._clear_since, clear_sec)):
             self._on_obstacle_cleared()
             return
 
@@ -518,9 +651,40 @@ class SafetyMonitor:
         if self._obstacle_active and obstacle_now:
             self.node.publish_cmd_vel(0.0, 0.0)
 
+    def _remember_driving_state(self):
+        """정지 사유가 처음 발생한 시점의 주행 상태만 기억한다 (2026-08-19).
+
+        이미 다른 사유로 멈춰 있는 상태(OBSTACLE_STOP/PERSON_WAIT)에서 두 번째
+        사유가 발생했을 때 그 정지 상태를 '복귀 대상'으로 덮어쓰면 안 된다.
+        """
+        if self.node.state_machine.state in self.DRIVING_STATES:
+            self._state_before_stop = self.node.state_machine.state
+
+    def _try_resume(self, reason: str):
+        """남아 있는 정지 사유가 없을 때만 주행을 재개한다 (2026-08-19)."""
+        if self._obstacle_active:
+            self.node.get_logger().info(
+                f'{reason} 해제됐지만 후방 장애물이 남아 있음 -> OBSTACLE_STOP 유지')
+            self.node.state_machine.transition(MissionState.OBSTACLE_STOP)
+            return
+        if self._person_active:
+            self.node.get_logger().info(
+                f'{reason} 해제됐지만 전방에 사람이 남아 있음 -> PERSON_WAIT 유지')
+            self.node.state_machine.transition(MissionState.PERSON_WAIT)
+            return
+
+        if self._state_before_stop is None:
+            self.node.get_logger().warn(
+                f'{reason} 해제됐지만 복귀할 주행 상태를 알 수 없음 -> 정지 상태 유지')
+            return
+
+        self.node.state_machine.transition(self._state_before_stop)
+        self._state_before_stop = None
+        self.node.resend_current_waypoint()
+
     def _on_obstacle_detected(self, distance: float):
         self._obstacle_active = True
-        self._state_before_obstacle = self.node.state_machine.state
+        self._remember_driving_state()
         # Nav2가 계속 /cmd_vel을 발행해 정지 명령을 덮어쓰는 것을 막기 위해 goal 자체를 취소
         self.node.cancel_current_nav_goal()
         self.node.publish_cmd_vel(0.0, 0.0)
@@ -544,13 +708,13 @@ class SafetyMonitor:
             return
 
         self.node.get_logger().info(
-            f'후방 장애물 해제 -> 이동 재개 ({self._obstacle_retry_count}/{self.obstacle_search_max})'
+            f'후방 장애물 해제 ({self._obstacle_retry_count}/{self.obstacle_search_max})'
         )
-        self.node.state_machine.transition(self._state_before_obstacle)
-        self.node.resend_current_waypoint()
+        self._try_resume('후방 장애물')
 
     def handle_person_detected(self, msg: Bool):
         person_present = msg.data
+        self._last_person_present = person_present
 
         # 장애물과 동일하게 정지 명령은 상태와 무관하게 항상 적용(안전 최우선).
         # DOCKING 중에는 aruco_node가 애초에 /person_detected를 발행하지 않으므로
@@ -567,7 +731,7 @@ class SafetyMonitor:
 
     def _on_person_detected(self):
         self._person_active = True
-        self._state_before_person = self.node.state_machine.state
+        self._remember_driving_state()
         # 장애물과 동일한 이유로 goal 자체를 취소(Nav2가 계속 /cmd_vel을 발행해
         # 정지 명령을 덮어쓰는 것을 막기 위함).
         self.node.cancel_current_nav_goal()
@@ -590,11 +754,10 @@ class SafetyMonitor:
             return
 
         self.node.get_logger().info(
-            f'전방 사람 감지 해제 -> 이동 재개 '
+            f'전방 사람 감지 해제 '
             f'({self._person_retry_count}/{self.person_wait_retry_max})'
         )
-        self.node.state_machine.transition(self._state_before_person)
-        self.node.resend_current_waypoint()
+        self._try_resume('전방 사람')
 
     def handle_button_event(self, msg: String):
         if msg.data == 'long':
@@ -605,6 +768,23 @@ class SafetyMonitor:
             self.node.get_logger().info('물리 버튼(짧게 누름) 입력 감지')
 
     def check_battery(self, voltage: float):
+        # 2026-08-19: OpenCR이 배터리 미장착/USB 급전 상태에서 0.0(또는 NaN)을
+        # 발행하면 0%로 환산되어 주행 중 저전압 복귀가 오발동한다 - 무효값은 버린다.
+        if not math.isfinite(voltage) or voltage < self.battery_voltage_min_valid:
+            self.node.get_logger().warn(
+                f'배터리 전압 {voltage}V는 유효 범위를 벗어남 '
+                f'(< {self.battery_voltage_min_valid}V) - 무시함',
+                throttle_duration_sec=10.0)
+            return
+
+        if self.battery_voltage_filtered is None:
+            self.battery_voltage_filtered = voltage
+        else:
+            a = self.battery_filter_alpha
+            self.battery_voltage_filtered = (
+                a * voltage + (1.0 - a) * self.battery_voltage_filtered)
+        voltage = self.battery_voltage_filtered
+
         span = self.battery_voltage_full - self.battery_voltage_empty
         percent = (voltage - self.battery_voltage_empty) / span * 100.0
         percent = max(0.0, min(100.0, percent))
@@ -700,8 +880,14 @@ class ServiceManagerNode(Node):
         # 즉시 OBSTACLE_STOP 이 걸려 Nav2 goal 이 취소되는 일이 초당 몇 번씩
         # 발생했다(주행이 엉뚱한 방향으로 가고 벽에 붙는 증상의 원인).
         # 연속 N회 확인을 통과해야만 상태를 바꾼다.
-        self.declare_parameter('rear_obstacle_confirm_count', 3)
-        self.declare_parameter('rear_clear_confirm_count', 5)
+        # 2026-08-19: 횟수 -> 시간 기반. 초음파 실측 발행률이 0.50Hz라 "3회 연속"이
+        # 6초를 의미했다(SafetyMonitor.__init__ 주석 참고). 아두이노를 빠른 주기로
+        # 바꾸더라도 이 값은 그대로 두면 된다.
+        self.declare_parameter('rear_obstacle_confirm_sec', 0.6)
+        self.declare_parameter('rear_clear_confirm_sec', 1.5)
+        # 초음파 수신 간격이 이 값보다 길면 "희소"로 보고 중앙값 창을 3으로 줄이고
+        # 확정 대기를 생략한다 (SafetyMonitor._rear_is_sparse 주석 참고).
+        self.declare_parameter('rear_sparse_interval', 0.5)
         self.declare_parameter('obstacle_search_max', 2)
         # 장애물(obstacle_search_max=2)보다 넉넉하게 잡음 - 사람은 장애물과 달리
         # 스스로 비켜줄 것으로 기대되는 일반적인 상황이라 더 여러 번 대기-재개를
@@ -721,11 +907,19 @@ class ServiceManagerNode(Node):
         self.declare_parameter('xy_goal_tolerance', 0.03)
         self.declare_parameter('nav_retry_max', 3)
         self.declare_parameter('dock_marker_id', 29)
+        # 2026-08-19: 도킹 마커 앞에서 최종적으로 멈출 거리(m).
+        # DockingController._range_error 주석 참고. 0으로 두면 도크에 충돌한다.
+        self.declare_parameter('dock_target_distance', 0.25)
         # 2026-08-18: 360도 탐색 -> 좌 90도 고정 회전으로 변경하며 추가된 값들
         # 2026-08-18 실측: 정확히 90도(1.5708)로 돌면 마커가 화각 경계에 걸려
         # 인식이 안 됐다. 5도 더 돌리면 화각 안으로 확실히 들어온다.
         # (오도메트리 각도 오차 + 카메라 장착 각도 오차가 합쳐진 결과로 보임)
-        self.declare_parameter('dock_turn_left_angle', 1.6581)   # rad (95도)
+        # 2026-08-19: 0으로 변경. 도킹 지점의 yaw를 마커 정면을 바라보도록 재측정해
+        # 놨기 때문에(waypoints.yaml docking yaw=1.4982), 도착 후 추가로 90도를 더
+        # 돌면 마커가 오히려 화각을 벗어난다. 0이면 도착 즉시 SETTLE->ALIGN 으로
+        # 넘어가 바로 마커 정렬을 시작한다.
+        # (도킹 지점 yaw를 다시 마커와 어긋나게 잡으면 이 값을 되살릴 것)
+        self.declare_parameter('dock_turn_left_angle', 0.0)
         # 회전 후에도 못 찾으면 이 각도씩 "돌고-멈추고-보고"를 반복한다.
         self.declare_parameter('dock_nudge_angle', 0.1222)       # rad (7도)
         self.declare_parameter('dock_turn_speed', 0.35)          # rad/s
@@ -738,6 +932,10 @@ class ServiceManagerNode(Node):
         self.declare_parameter('dock_use_yaw_term', True)
         self.declare_parameter('docking_waypoint_id', 'docking')
         self.declare_parameter('startup_ready_delay', 3.0)
+        # 2026-08-19: `--ros-args -r`의 토픽 리맵 규칙은 액션 이름에 적용되지 않는다
+        # (실측 확인). 실기체를 안 움직이고 상태머신만 시험하려면 이 파라미터로
+        # 가짜 액션 서버를 가리켜야 한다.
+        self.declare_parameter('nav_action_name', '/navigate_to_pose')
 
         self.nav_timeout = self.get_parameter('nav_timeout').value
         self.nav_retry_max = self.get_parameter('nav_retry_max').value
@@ -799,10 +997,16 @@ class ServiceManagerNode(Node):
             BatteryState, '/battery_state', self.on_battery_state, 10
         )
 
-        self.nav_action_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
+        self.nav_action_name = self.get_parameter('nav_action_name').value
+        self.nav_action_client = ActionClient(self, NavigateToPose, self.nav_action_name)
+        self.get_logger().info(f'Nav2 액션 클라이언트: {self.nav_action_name}')
         self._nav_goal_handle = None
         self._nav_goal_generation = 0
         self._nav_timeout_timer = None
+        # 2026-08-19: goal을 보낸 뒤 accept 응답(on_goal_response)이 도착하기 전
+        # 구간에서 취소가 결정된 경우를 기록한다. 이 플래그가 없으면 그 창에 들어온
+        # 취소가 통째로 유실된다(아래 cancel_current_nav_goal/on_goal_response 참고).
+        self._nav_cancel_requested = False
 
         self.state_timer = self.create_timer(0.2, self.on_state_timer)
         self.docking_timer = self.create_timer(0.05, self.on_docking_timer)
@@ -894,6 +1098,16 @@ class ServiceManagerNode(Node):
             self.get_logger().warn(response.message)
             return response
 
+        # 2026-08-19: 사람/장애물이 이미 앞에 있는 상태로는 출발하지 않는다. 에지
+        # 트리거만 믿으면 "이미 True로 래치된 상태"에서 임무를 시작했을 때 정지가
+        # 한 번도 안 걸리는 구멍이 생긴다(실기체에서 사람 앞으로 그냥 출발함).
+        blocked = self.safety_monitor.blocking_reason()
+        if blocked:
+            response.success = False
+            response.message = f'{blocked} - 해제 후 다시 시도하세요'
+            self.get_logger().warn(response.message)
+            return response
+
         self.destination_id = dest
         self.waypoint_sequencer.build_trajectory_1(dest)
         self.safety_monitor.reset_obstacle_retries()
@@ -914,6 +1128,9 @@ class ServiceManagerNode(Node):
         self.cancel_current_nav_goal()
         self.docking_controller.stop()
         self.publish_cmd_vel(0.0, 0.0)
+        # 2026-08-19: 임무 흐름이 끊겼으므로 정지 사유 래치도 같이 푼다. 안 그러면
+        # 다음 임무에서 같은 사유가 에지로 안 잡혀 안전정지가 통째로 무력화된다.
+        self.safety_monitor.reset_stop_conditions()
         self.state_machine.transition(MissionState.READY)
         self.publish_tts('mission_cancelled')
         self.get_logger().info('cancel_mission requested')
@@ -990,6 +1207,8 @@ class ServiceManagerNode(Node):
         # 조용히 넘어가버린 버그가 실측됨 - 세대 검사 + 아래 상태 검사로 방지.
         self._nav_goal_generation += 1
         generation = self._nav_goal_generation
+        # 이번엔 의도적으로 새 goal을 보내는 것이므로 이전 취소 의사는 지운다.
+        self._nav_cancel_requested = False
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
@@ -997,7 +1216,12 @@ class ServiceManagerNode(Node):
         goal_msg.pose.pose.position.x = float(wp['x'])
         goal_msg.pose.pose.position.y = float(wp['y'])
         goal_msg.pose.pose.position.z = 0.0
-        goal_msg.pose.pose.orientation.w = 1.0
+        # 2026-08-19: waypoints.yaml의 yaw를 실제로 반영한다. 예전엔
+        # orientation.w=1.0을 하드코딩해서 yaml에 뭘 적든 항상 map +X 방향으로
+        # 도착했다 - 도킹 지점처럼 도착 방향이 중요한 곳의 yaw가 조용히 무시됐다.
+        yaw = float(wp.get('yaw', 0.0))
+        goal_msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        goal_msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
 
         send_future = self.nav_action_client.send_goal_async(
             goal_msg, feedback_callback=self.on_nav_feedback
@@ -1009,8 +1233,23 @@ class ServiceManagerNode(Node):
         self._start_nav_timeout_timer()
 
     def on_goal_response(self, future, generation):
-        if generation != self._nav_goal_generation:
-            self.get_logger().debug('만료된 nav goal 응답 무시 (이미 새 목표로 대체됨)')
+        # 2026-08-19 실기체 실측한 치명적 경합:
+        # send_goal_async() 직후 accept 응답이 오기 전(실측 최대 4.1초!)에 사람/
+        # 장애물이 감지되면, cancel_current_nav_goal()을 부를 시점엔 _nav_goal_handle이
+        # 아직 None이라 취소도 세대 증가도 일어나지 않는다. 그 결과 상태머신은
+        # PERSON_WAIT인데 Nav2는 goal을 그대로 들고 목적지까지 5.6m를 완주했다
+        # (안전정지 무력화). 핸들을 받는 이 시점에 취소 의사가 남아 있으면 즉시
+        # 취소해야 한다.
+        stale = (generation != self._nav_goal_generation)
+        if stale or self._nav_cancel_requested:
+            try:
+                gh = future.result()
+            except Exception:
+                gh = None
+            if gh is not None and gh.accepted:
+                reason = '이미 새 목표로 대체됨' if stale else '수락 전에 취소 결정됨'
+                self.get_logger().warn(f'nav goal 핸들 수신 즉시 취소 ({reason})')
+                gh.cancel_goal_async()
             return
 
         try:
@@ -1040,11 +1279,14 @@ class ServiceManagerNode(Node):
         if generation != self._nav_goal_generation:
             self.get_logger().debug('만료된 nav goal 결과 무시 (이미 새 목표로 대체됨)')
             return
-        if self.state_machine.state not in self.safety_monitor.NAV_DRIVEN_STATES:
+        # 2026-08-19: NAV_DRIVEN_STATES에는 정지 상태(PERSON_WAIT/OBSTACLE_STOP)도
+        # 들어있으므로 여기서는 실제 주행 상태만 통과시킨다.
+        if self.state_machine.state not in self.safety_monitor.DRIVING_STATES:
             self.get_logger().warn(
                 f'nav goal 결과가 도착했지만 현재 상태({self.state_machine.state.name})는 '
                 '더 이상 주행을 기대하지 않음 - 무시'
             )
+            self._cancel_nav_timeout_timer()
             return
 
         self._cancel_nav_timeout_timer()
@@ -1130,6 +1372,9 @@ class ServiceManagerNode(Node):
 
     def cancel_current_nav_goal(self):
         self._cancel_nav_timeout_timer()
+        # 2026-08-19: 아직 accept 응답을 못 받아 핸들이 없더라도 취소 의사는 반드시
+        # 남긴다. on_goal_response가 이 플래그를 보고 핸들을 받자마자 취소한다.
+        self._nav_cancel_requested = True
         if self._nav_goal_handle is not None:
             self._nav_goal_handle.cancel_goal_async()
             self._nav_goal_handle = None
