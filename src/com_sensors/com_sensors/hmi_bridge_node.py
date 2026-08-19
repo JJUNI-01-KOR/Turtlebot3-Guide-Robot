@@ -46,6 +46,21 @@ ARRIVED_STATE_CODE = 0x04
 # ERROR/EMERGENCY_STOP 둘 다 STATE_CODE_MAP에서 0x0A로 합쳐져 있음
 # (service_manager_node.STATE_CODE_MAP 참고)
 ERROR_STATE_CODE = 0x0A
+READY_STATE_CODE = 0x02
+DOCKED_STATE_CODE = 0x09
+
+# 보드를 메뉴(SELECT) 화면으로 되돌려야 하는 상태코드.
+# 2026-08-19 실기체 실측 버그: 예전엔 ERROR(0x0A)만 여기 있었고 READY(0x02)/
+# DOCKED(0x09)가 빠져 있었다. 보드의 MOVING 화면에는 자체 타임아웃이 없고
+# (ARRIVED만 5초 후 자동 복귀), MOVING 상태에서는 조이스틱 입력도 전부 무시하므로
+# (eyes_board_jul31a.ino가 uiState == SELECT일 때만 MOVE/CONFIRM을 처리),
+# 임무를 정상 완료(... -> DOCKING(0x03) -> DOCKED(0x09) -> READY(0x02))하면
+# 화면이 눈(MOVING)에 영구히 멈춰서 재부팅 전까지 새 목적지를 못 고르게 됐다.
+MENU_STATE_CODES = (READY_STATE_CODE, DOCKED_STATE_CODE, ERROR_STATE_CODE)
+
+# 배터리 퍼센트 전송 최소 변화폭(%). 전압 노이즈로 반올림 퍼센트가 계속 바뀌어
+# 매초 시리얼 쓰기 + 화면 숫자 깜빡임이 발생했다(실측: 86->90->89->90->89->87->90).
+BATTERY_SEND_DEADBAND = 3
 
 JOY_X_LOW_THRESHOLD = 300
 JOY_X_HIGH_THRESHOLD = 700
@@ -236,15 +251,21 @@ class HmiBridgeNode(Node):
         elif msg.data == ARRIVED_STATE_CODE:
             self._write(b'S:ARRIVED\n')
             self.get_logger().info('state_code=0x04 -> 보드에 S:ARRIVED 전송')
-        elif msg.data == ERROR_STATE_CODE:
+        elif msg.data in MENU_STATE_CODES:
             # 예전엔 이 분기가 없어서 ERROR 진입 시 보드 화면이 MOVING(눈)에 멈춰있었음
             self._write(b'S:SELECT\n')
-            self.get_logger().info('state_code=0x0A(ERROR) -> 보드에 S:SELECT 전송, 메뉴로 복귀')
+            self.get_logger().info(
+                f'state_code=0x{msg.data:02X} -> 보드에 S:SELECT 전송, 메뉴로 복귀')
 
     def on_battery_percent(self, msg: Float32):
         percent = max(0, min(100, round(msg.data)))
-        if percent == self.last_sent_battery:
-            return
+        # 전압 노이즈로 인한 퍼센트 떨림을 걸러낸다(BATTERY_SEND_DEADBAND 참고).
+        # 0%/100% 양 끝은 데드밴드와 무관하게 한 번은 정확히 보여준다.
+        if self.last_sent_battery is not None:
+            changed_enough = abs(percent - self.last_sent_battery) >= BATTERY_SEND_DEADBAND
+            is_edge = percent in (0, 100) and percent != self.last_sent_battery
+            if not (changed_enough or is_edge):
+                return
         self.last_sent_battery = percent
         self._write(f'B:{percent}\n'.encode('utf-8'))
         self.get_logger().info(f'battery_percent={msg.data:.1f} -> 보드에 B:{percent} 전송')
