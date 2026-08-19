@@ -1,12 +1,43 @@
 # TurtleBot3 기반 방문자 안내 로봇 (COM팀)
 
-> **최종 업데이트: 2026-08-18.** 이 문서는 "구현 예정"이 아니라 **실제 동작 확인된 현재 상태**를 기준으로 씁니다.
+> **최종 업데이트: 2026-08-19.** 이 문서는 "구현 예정"이 아니라 **실제 동작 확인된 현재 상태**를 기준으로 씁니다.
+>
+> ### 8/19: 전면 코드리뷰 + 실기체 검증 (안전 관련 버그 다수 수정)
+>
+> **실기체에서만 드러난 치명적 버그 3건을 잡았습니다.** 격리 테스트로는 재현되지 않던 것들입니다.
+>
+> | 버그 | 증상 | 조치 |
+> |---|---|---|
+> | **Nav2 goal 수락 전 취소 유실** | 사람 감지로 정지했는데 **로봇이 목적지까지 5.6m를 완주**. 상태머신은 내내 `PERSON_WAIT`였음 | `cancel_current_nav_goal()`이 goal 핸들이 있을 때만 취소했는데, Nav2의 accept 응답이 **실측 4.1초**나 걸려 그 사이 취소가 통째로 유실됐음. `_nav_cancel_requested` 플래그로 핸들 수신 즉시 취소 |
+> | **취소 후 정지 래치 잔존** | `cancel_mission` 후 다음 임무에서 **사람이 앞에 있는데 그냥 출발** | `cancel_mission`이 상태만 READY로 되돌리고 `_person_active=True`를 남겨 에지 트리거가 안 걸렸음. `reset_stop_conditions()` + 임무 시작 시 `blocking_reason()` 사전 차단 |
+> | **HMI가 임무 완료 후 영구 정지** | 정상 완료(`DOCKED→READY`) 시 TFT가 눈 화면에 멈춰 **재부팅 전까지 새 목적지 선택 불가** | `hmi_bridge`가 `ERROR(0x0A)`만 메뉴 복귀 처리하고 `READY(0x02)`/`DOCKED(0x09)`가 빠져 있었음. 보드의 MOVING 화면엔 타임아웃이 없고 조이스틱 입력도 무시됨 |
+>
+> **환경 문제 2건도 규명했습니다.**
+>
+> - **부팅 시 시계 점프로 Nav2/TF가 매번 죽던 문제** — 파이에 RTC가 없어(`RTC time: n/a`) 부팅 시 "마지막 기록 시각"으로 복원됐다가 NTP가 붙으면 크게 점프합니다(실측: 하룻밤 껐다 켜면 **+15.1시간**, 30분이면 +40분). PM2가 그 전에 노드를 띄우면 TF 스탬프가 전부 과거가 되어 tf2 버퍼(10초)가 버리고 `map→odom`·`odom→base_footprint`가 통째로 사라집니다. **매 부팅 100% 재현.** `run_node.sh`에 NTP 동기 대기(최대 60초, 오프라인이면 경고 후 진행)를 넣어 해결 — **다음 콜드부팅에서 검증 필요.**
+> - **아두이노 펌웨어 미업로드** — 08-18에 파이 쪽 코드는 "후방 초음파 10Hz" 전제로 바뀌었는데(`R:` 단독 라인 처리, 중앙값 필터, 초음파 폐루프 후진) **펌웨어만 안 올라가 있어 실측 0.50Hz**였습니다. 그 결과 장애물 확정에 **8초(1.76m 주행)**가 걸리고 `auto_dock_node`의 후진 단계는 구조적으로 불가능했습니다. 펌웨어 업로드 후 **9.5Hz 확인, 장애물 확정 0.96초(0.21m)로 개선.**
+>
+> **그 외 수정**: 도킹 목표거리 0 문제(마커 3cm까지 밀고 들어가 충돌)→`dock_target_distance` 도입 · 배터리 0V 오독으로 저전압 복귀 오발동→하한 가드+EMA 평활화 · 장애물/사람 정지 교차 복구 버그 · waypoint `yaw` 무시 · udev 규칙 문법 오류(쉼표 누락으로 새 SD카드에선 심볼릭 링크 생성 실패) · 시리얼 라인 쪼개짐 · costmap 중복 플러그인 · `package.xml` 의존성 누락 3건.
+>
+> **목적지 id 변경**: `room1~room8` → **`class1~class5`, `info`, `office`, `meeting`**. 좌표도 `class1~class5`와 `docking`을 재측정했습니다. id는 내부 키일 뿐이라 표시 라벨(강의실1~5/회의실/인포/상담실)은 그대로입니다 — `info`가 회의실을 가리키는 식으로 어긋나 있으니 주의.
+>
+> **정식 문서 7종 갱신 완료**: `docs/requirements/`의 URS/SRS/SAD/SDD/DDS/HMI/ICD 전부를 위 내용 기준으로 개정했습니다(§14에 문서별 버전과 반영 내용 표). `00_시나리오.md`에도 8/19 노트를 추가했습니다.
+>
+> **⚠️ git은 로봇에만 있고, 오늘 작업분은 전부 미커밋입니다.** (이 문단은 2026-08-19 후반에 실측으로 정정했습니다 — 그 전엔 "git 저장소가 없다"고 적혀 있었는데, 로봇 쪽만 확인해 보면 사실이 아닙니다.)
+>
+> - **로봇 `~/com_ws`**: GitHub 원격(`unitydt-ros2-class2-2026/com_main_project_01`)이 붙은 정상 저장소. 현재 브랜치 `feature/mission`, 마지막 커밋 `c4900eb`(2026-08-19 10:18, push 완료). **다만 그 이후의 오늘 작업분 23개 파일이 전부 미커밋 상태**입니다 — 8/19 코드리뷰 결과가 통째로 여기 들어 있으니 정리해서 커밋하세요.
+> - **관제 PC `~/com_ws`**: git 없는 단순 미러(clone이 아님). 그래서 PC와 파이의 소스가 **양방향으로 갈라져 있던 것**이 확인됐고(파이에만 08-18 작업 8개 파일, PC에만 08-14 작업), 실제로 덮어쓰는 사고가 두 번 났습니다(백업으로 복구).
+>
+> **PC↔파이로 파일을 옮기기 전에 반드시 내용 diff를 확인하세요. md5 비교만으로는 누구 변경인지 알 수 없습니다.** 근본 대책은 PC 쪽도 같은 저장소를 clone해서 쓰는 것입니다(미착수).
 >
 > ### 🎉 8/18 저녁 실주행 테스트: 자율주행 전 구간 성공
 >
 > | 항목 | 결과 |
 > |---|---|
 > | room1까지 실주행 (5.66m) | **77초** ✅ |
+> 
+> *(당시 id·좌표 기준. `room1`은 2026-08-19에 `class1`로 이름이 바뀌었고 좌표도 재측정되어 지금은 도킹 지점에서 약 4m입니다 — §10)*
+>
 > | ARRIVED 대기 | 5.0초 (파라미터대로) ✅ |
 > | 도킹 지점 복귀 | **43초** ✅ |
 > | 최종 위치 정확도 | 목표 대비 **3mm** ✅ |
@@ -26,19 +57,28 @@
 
 ## 🔋 다음 세션 재개 절차
 
+0. **(콜드부팅 직후라면) 시계가 튀지 않았는지 먼저 확인** — 파이에 RTC가 없어 부팅 시 시계가 크게 어긋났다가 NTP가 붙으며 점프하고, 그러면 TF가 통째로 죽습니다(§12). `run_node.sh`에 NTP 대기를 넣어 해결했지만 검증 전이니 당분간은 확인하세요:
+   ```bash
+   ssh com@192.168.210.15
+   uptime -p                       # 실제 부팅 후 경과
+   pm2 list                        # uptime 컬럼이 위와 비슷해야 정상
+   timedatectl | grep synchronized # yes 여야 함
+   ```
+   `pm2 list`의 uptime이 실제 부팅 경과보다 훨씬 크면 시계가 점프한 것 → `pm2 restart all`.
+
 1. **PM2가 정상 기동 중인지부터 확인** (평소엔 전원 인가 시 자동으로 떠 있어야 정상):
    ```bash
    ssh com@192.168.210.15
    pm2 list   # 8개(bringup/navigation/vision/sensor_bridge/hmi_bridge/service_manager/status/voice) 전부 online인지 확인
    ```
    `ecosystem.config.js`에 없는 이름(예: 과거의 `com_robot`처럼)이 섞여 있으면 `pm2 delete <이름>`으로 정리하세요. 8개 중 일부가 안 떠 있으면 `pm2 start ~/com_ws/src/com_launch/ecosystem.config.js && pm2 save`로 복구.
-2. **배터리 충전 확인** (12V 근처 권장, §8-1 참고):
+2. **배터리 충전 확인** (12V 근처 권장, §8-1 참고). **`/battery_state`나 `/odom`이 아예 안 나오면 OpenCR 연결이 끊긴 것**입니다 — `turtlebot3_node`는 기동 시 한 번만 시리얼을 잡아서, OpenCR이 죽어 있는 동안 떠 있으면 나중에 전원이 돌아와도 스스로 재연결하지 않습니다. **전원 정상화 후 반드시 `pm2 restart bringup`**(2026-08-19 실측):
    ```bash
    source /opt/ros/humble/setup.bash && source ~/com_ws/install/setup.bash
    export ROS_DOMAIN_ID=30
    ros2 topic echo /battery_state --once | grep -E "voltage|percentage"
    ```
-3. **로봇을 충전 스테이션 앞 정렬점에 둔 상태인지 확인** — `nav2_params.yaml`의 `set_initial_pose` 좌표(도킹 지점, 현재 x=0.735, y=-0.007 — **2026-08-18 실주행으로 검증 완료**)가 이 위치를 전제로 합니다. **로봇을 다른 곳에 두고 시작하면 이 좌표를 반드시 실제 위치로 갱신하세요** — 8/18에 이 값이 어긋나 있어서(벽에서 10cm 지점) Nav2가 경로 계산 자체를 거부했던 전례가 있습니다(§12).
+3. **로봇을 충전 스테이션 앞 정렬점에 둔 상태인지 확인** — `nav2_params.yaml`의 `set_initial_pose` 좌표(도킹 지점, **2026-08-19 재측정: x=0.5327, y=0.0383, yaw=1.4982 rad(85.8°)** — 마커를 정면으로 바라보는 자세)가 이 위치를 전제로 합니다. 이 좌표는 **세 파일에 중복**돼 있어 바꿀 땐 반드시 같이 고쳐야 합니다: `waypoints.yaml`(docking), `nav2_params.yaml`(`amcl.initial_pose`), `auto_dock_params.yaml`(`dock_approach_*`). 테스트가 세 값의 일치를 강제합니다(`com_service/test/offline/test_waypoints.py`). **로봇을 다른 곳에 두고 시작하면 이 좌표를 반드시 실제 위치로 갱신하세요** — 8/18에 이 값이 어긋나 있어서(벽에서 10cm 지점) Nav2가 경로 계산 자체를 거부했던 전례가 있습니다(§12).
 4. **PM2로 안 뜨는 경우에만 수동 기동** (평소엔 1번에서 이미 떠 있어야 하므로 이 단계는 예외 상황용):
    ```bash
    ps aux | grep -E "com_ws/install|turtlebot3_ros|component_container|camera_ros" | grep -v grep
@@ -66,7 +106,7 @@
    둘 다 멈추지 않고 계속 갱신되면 안전하게 `/start_mission` 테스트 진행. (참고: 예전 "거짓 도착" 버그는 2026-08-18에 `set_initial_pose` 좌표 문제로 원인이 밝혀져 해결됐습니다 — §12. 그래도 주행 전 이 확인은 습관으로 유지하는 게 좋습니다.)
 6. **음성 안내가 필요하면 스피커 확인**: USB 오디오 동글(Jieli UACDemoV1.0)이 하드웨어적으로 불안정한 상태로 남아있습니다(§12). **2026-08-12: 볼륨 100%(유니티 게인)에서 재생 중 끊김이 재현 확인돼 기본값을 80%로 낮춤 - 이걸로 재생 자체는 안정화됐지만 하드웨어 불안정성 자체가 없어진 건 아니니 여전히 `aplay`로 먼저 확인 권장.**
 
-TurtleBot3 Burger, ROS 2 Humble, Nav2, ArUco 마커를 이용한 실내 방문자 안내 로봇입니다. 로봇은 방문자를 지정 목적지(강의실1~5, 회의실, 인포, 상담실 = room1~room8)까지 자율주행으로 안내하고, 이동 중 온도·습도·불꽃을 측정하며, 임무 완료 후 **ArUco 마커 기반 정밀 도킹**으로 충전 스테이션에 자동 복귀합니다.
+TurtleBot3 Burger, ROS 2 Humble, Nav2, ArUco 마커를 이용한 실내 방문자 안내 로봇입니다. 로봇은 방문자를 지정 목적지(강의실1~5, 회의실, 인포, 상담실 = class1~meeting)까지 자율주행으로 안내하고, 이동 중 온도·습도·불꽃을 측정하며, 임무 완료 후 **ArUco 마커 기반 정밀 도킹**으로 충전 스테이션에 자동 복귀합니다.
 
 - 저장소: `unitydt-ros2-class2-2026/com_main_project_01` (통합 브랜치: `feature/mission`)
 - 팀: COM (김찬중, 권오민)
@@ -91,6 +131,7 @@ TurtleBot3 Burger, ROS 2 Humble, Nav2, ArUco 마커를 이용한 실내 방문�
 11. [운영상 주의사항 (SSH·백그라운드 실행)](#11-운영상-주의사항-ssh백그라운드-실행)
 12. [알려진 문제 / 미구현 항목](#12-알려진-문제--미구현-항목)
 13. [팀원 역할](#13-팀원-역할)
+14. [정식 요구사항·설계 문서](#14-정식-요구사항설계-문서)
 
 ---
 
@@ -99,7 +140,7 @@ TurtleBot3 Burger, ROS 2 Humble, Nav2, ArUco 마커를 이용한 실내 방문�
 처음 방문한 실내 공간(강의실·복도)에서 방문자가 목적지를 찾지 못해 발생하는 문제를 해결하는 로봇입니다. 목적지까지 직접 안내하면서 이동 경로상의 환경 상태(온도·습도·불꽃)를 함께 점검·기록합니다.
 
 **구현 및 실측 완료**
-- Nav2 기반 자율주행으로 목적지(room1~room8) 안내 — **2026-08-18 전 구간 실주행 성공** (room1까지 77초·5.66m 실주행 → ARRIVED 5초 대기 → 도킹 지점 복귀 43초, 최종 위치 오차 **3mm**). 2026-08-06에도 실주행 성공한 바 있음(좌표 오차 3.6cm)
+- Nav2 기반 자율주행으로 목적지(class1~meeting) 안내 — **2026-08-18 전 구간 실주행 성공** (당시 `room1`(현 `class1`, 좌표는 8/19 재측정됨)까지 77초·5.66m 실주행 → ARRIVED 5초 대기 → 도킹 지점 복귀 43초, 최종 위치 오차 **3mm**). 2026-08-06에도 실주행 성공한 바 있음(좌표 오차 3.6cm)
 - ArUco 마커 인식 + 사람 감지(HOG) — 구현 완료. 2026-08-11에 사람감지 주기를 마커 검출(5Hz)과 분리(기본 1Hz)해 CPU 사용량 약 23% 절감(67.5%→52%, `aruco_node` 단독 기준). 다만 Pi4에서 Nav2와 동시 구동 시 여전히 여유가 빠듯함(§12 참고)
 - **ARRIVED → RETURNING → DOCKING → DOCKED → READY 자동 사이클** — 2026-08-18 실주행에서 `ARRIVED`(5초 대기) → `RETURNING` → 도킹 지점 도착 → `DOCKING` 진입까지 전 구간 확인. **마지막 ArUco 정렬 단계만 미검증**(마커 실검출 확인 전, §12)
 - **PERSON_WAIT**(사람 감지 시 정지·대기) — 2026-08-06 구현(OBSTACLE_STOP과 동일 패턴), 실물 검증 예정
@@ -267,6 +308,38 @@ sudo udevadm trigger
 ```
 안 하면 재부팅·재연결마다 `ttyACM` 번호가 바뀌어서 `hmi_bridge_node`가 엉뚱한(또는 존재하지 않는) 포트를 붙잡고 계속 I/O 에러를 내는 문제가 생깁니다(§3, §12 참고). 아두이노 보드를 교체하면 규칙 파일의 시리얼 번호도 다시 확인해서 갱신해야 합니다.
 
+설치 후 반드시 확인하세요 — udev는 **쉼표가 하나라도 빠지면 규칙 줄을 통째로 버립니다**(에러 없이 조용히). 2026-08-19에 저장소 사본이 실제로 그 상태였습니다:
+```bash
+ls -la /dev/com_sensorboard /dev/com_tftboard   # 둘 다 ttyACM* 을 가리켜야 정상
+```
+
+**⑤-1 (2026-08-19 추가) 아두이노 펌웨어 업로드 도구** — 보드가 파이에 USB로 붙어 있어서 파이에서 바로 컴파일·업로드할 수 있습니다. `~/.arduino15`(AVR 코어)와 `~/Arduino/libraries`(DHT/MCUFRIEND_kbv/Adafruit_GFX)는 이미 설치돼 있고, `arduino-cli`만 받으면 됩니다:
+```bash
+curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/bin sh
+export PATH=$HOME/bin:$PATH
+```
+업로드 (**포트를 잡고 있는 노드를 먼저 내려야 avrdude가 포트를 엽니다**):
+```bash
+# 메인센서보드 (DHT11+불꽃+초음파+조이스틱)
+pm2 stop sensor_bridge
+arduino-cli compile --fqbn arduino:avr:uno ~/com_ws/arduino/flaem_pir_dht11_jul31a
+arduino-cli upload  --fqbn arduino:avr:uno -p /dev/com_sensorboard ~/com_ws/arduino/flaem_pir_dht11_jul31a
+pm2 start sensor_bridge
+
+# TFT보드 (목적지 메뉴 + 눈 화면)
+pm2 stop hmi_bridge
+arduino-cli compile --fqbn arduino:avr:uno ~/com_ws/arduino/eyes_board_jul31a
+arduino-cli upload  --fqbn arduino:avr:uno -p /dev/com_tftboard ~/com_ws/arduino/eyes_board_jul31a
+pm2 start hmi_bridge
+```
+**목적지 id를 바꾸면 TFT보드를 반드시 재업로드하세요** — 보드가 `SELECT:<id>`를 보내는데 `service_manager`가 모르는 id면 거부되어 물리 메뉴가 통째로 죽습니다.
+
+업로드 후 확인:
+```bash
+ros2 topic hz /com_sensors/rear_distance   # 약 10Hz 여야 정상 (2초 주기면 옛 펌웨어)
+```
+롤백용으로 직전 펌웨어 소스를 `arduino/backup/`에 보관해 뒀습니다.
+
 **⑥ PM2 설치 (파이, 자동기동/자동재시작용)**
 ```bash
 sudo apt install -y npm && sudo npm install -g pm2
@@ -422,9 +495,9 @@ ros2 run com_service com_voice_node
 
 로봇에 탑재된 TFT+조이스틱으로 목적지를 선택하거나, 서비스를 직접 호출:
 ```bash
-ros2 service call /start_mission com_interfaces/srv/StartMission "{destination_id: room1}"
+ros2 service call /start_mission com_interfaces/srv/StartMission "{destination_id: class1}"
 ```
-유효한 `destination_id`는 `room1`~`room8`입니다. `state == READY`일 때만 수락됩니다.
+유효한 `destination_id`는 `class1`~`meeting`입니다. `state == READY`일 때만 수락됩니다.
 
 ### 상태 확인용 명령 모음
 
@@ -445,8 +518,8 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 
 | 구분 | 이름 | 타입 | 비고 |
 |---|---|---|---|
-| Topic | `/com_sensors/temperature`, `/humidity`, `/flame_detected` | Float32/Bool | BEST_EFFORT, 메인센서보드 |
-| Topic | `/com_sensors/rear_distance`(Float32, cm), `/rear_obstacle`(Bool) | - | 후방 초음파, BEST_EFFORT |
+| Topic | `/com_sensors/temperature`, `/humidity`, `/flame_detected` | Float32/Bool | BEST_EFFORT, 메인센서보드. 0.5Hz(DHT11이 2초 이상 간격을 요구) |
+| Topic | `/com_sensors/rear_distance`(Float32, cm), `/rear_obstacle`(Bool) | - | 후방 초음파, BEST_EFFORT. **2026-08-19 실측 9.5Hz** (아두이노가 `R:<cm>,O:<0/1>` 단독 라인을 100ms 주기로 보냄. 온습도/불꽃이 실린 통합 텔레메트리는 DHT11 제약 때문에 별도로 2초 주기 유지) |
 | Topic | `/com_sensors/joystick_x`(Int32), `/joystick_button`(Bool) | - | BEST_EFFORT |
 | Topic | `/aruco_marker` | com_interfaces/ArucoMarker | marker_id, pose, lateral_error, distance_error |
 | Topic | `/person_detected` | std_msgs/Bool | DOCKING 상태에서는 발행 안 함(최적화) |
@@ -456,7 +529,7 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 | Topic | `/robot_state` | com_interfaces/RobotState | status 노드, 2Hz |
 | Topic | `/battery_state` | sensor_msgs/BatteryState | OpenCR(`turtlebot3_node`) 발행, service_manager가 직접 구독 |
 | Topic | `/tts_request` | com_interfaces/TtsRequest | `service_manager`가 주요 상태 전이 시 발행 → `voice_node`가 구독해 재생 (2026-08-11 연결) |
-| Service | `/start_mission` | com_interfaces/StartMission | destination_id: room1~room8 |
+| Service | `/start_mission` | com_interfaces/StartMission | destination_id: class1~meeting |
 | Service | `/cancel_mission` | std_srvs/Trigger | READY로 직접 복귀 |
 | Service | `/get_measurement_log` | com_interfaces/GetMeasurementLog | `/env_data` 발행자가 없어 **항상 빈 결과** |
 | Action | `/navigate_to_pose` | nav2_msgs/action/NavigateToPose | service_manager → Nav2 |
@@ -476,9 +549,27 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 
 - 지도: `com_navigation/maps/map.yaml` (+ `map.pgm`), SLAM으로 사전 작성.
 - 웨이포인트: `com_navigation/config/waypoints.yaml` — `id`, `label`, `x`, `y`, `yaw`, (목적지면 `is_destination: true`).
-  - 목적지(8곳): `room1`(강의실1) ~ `room5`(강의실5), `room6`(회의실), `room7`(인포), `room8`(상담실)
-  - 특수 지점: `docking`(충전 스테이션 정렬점), `docking2`
-  - 나머지(`way6`~`way16`)는 경유점(현재 `WaypointSequencer`는 `trajectory_1`/`trajectory_2` 키가 정의 안 되어 있어 **직행** — 경유점을 거치지 않고 목적지로 바로 이동함)
+
+  **목적지 8곳 (2026-08-19 기준)** — `class1`~`class5` 좌표와 `docking`은 이날 재측정했습니다.
+
+  | id | 표시 라벨 | x | y | yaw |
+  |---|---|---|---|---|
+  | `class1` | 강의실1 | 4.5604 | 0.5400 | 0.0 |
+  | `class2` | 강의실2 | 9.1789 | 0.6447 | 0.0 |
+  | `class3` | 강의실3 | 17.9021 | 0.5400 | 0.0 |
+  | `class4` | 강의실4 | 20.9246 | -0.8556 | 0.0 |
+  | `class5` | 강의실5 | 22.5940 | 0.4181 | 0.0 |
+  | `info` | **회의실** | 12.5646 | -3.6379 | 0.0 |
+  | `office` | **인포** | 2.9565 | -4.0722 | 0.0 |
+  | `meeting` | **상담실** | 12.7092 | -4.2376 | 0.0 |
+  | `docking` | 도킹 | **0.5327** | **0.0383** | **1.4982**(85.8°) |
+
+  - **⚠️ id와 표시 라벨이 1:1로 대응하지 않습니다.** 2026-08-19에 `room1~room8`에서 이름만 바꾼 것이고 물리 위치는 그대로라, `info`가 회의실을, `office`가 인포를, `meeting`이 상담실을 가리킵니다. 라벨을 id 뜻에 맞추려면 TFT 글리프(`hangul_font.h`, 현재 34종)에 `사`·`무`를 추가해야 합니다. 라벨은 `waypoints.yaml` / `com_gui`의 `DESTINATIONS` / `eyes_board_jul31a.ino` 세 곳에 있습니다.
+  - **id를 바꾸면 TFT 보드 펌웨어를 반드시 재업로드하세요.** 보드가 `SELECT:<id>`를 보내는데 `service_manager`가 모르는 id면 거부되어 **물리 메뉴가 통째로 죽습니다**(§6-⑤-1).
+  - `docking` 좌표는 **세 파일에 중복**돼 있습니다(`waypoints.yaml`, `nav2_params.yaml`의 `amcl.initial_pose`, `auto_dock_params.yaml`의 `dock_approach_*`). 셋의 일치를 테스트가 강제합니다.
+  - `docking`의 yaw는 **마커를 정면으로 바라보는 자세**로 잡혀 있어서, 도킹 시퀀스의 좌회전 각도를 **0으로 설정**했습니다(`dock_turn_left_angle`, `turn_left_angle`). 도킹 지점 자세를 다시 마커와 어긋나게 잡으면 이 값을 되살려야 합니다.
+  - 나머지(`way6`~`way16`, `docking2`)는 경유점입니다. `trajectory_1`/`trajectory_2` 키는 2026-08-19에 **빈 리스트로 명시**했습니다 — 즉 도킹↔목적지를 Nav2 단일 goal로 **직행**하며, 경유점 11개는 현재 안 쓰입니다. 기동 시 `service_manager`가 미사용 경유점 목록을 warn으로 알려줍니다. (예전엔 키 자체가 없어서 "직행이 의도인지 빠뜨린 건지" 구분이 안 됐습니다.) 참고로 `way16`은 `way13`과 좌표가 완전히 동일합니다 — 복사 실수로 보입니다.
+  - **새 좌표를 넣을 땐 지도상 여유부터 확인하세요.** 8/18에 출발점이 벽에서 10cm라 lethal 셀로 잡혀 모든 목적지가 `status=6 ABORTED` 났던 전례가 있습니다(§12). 현재 8곳 전부 FREE 셀이고 최근접 장애물까지 0.30~1.00m 확보돼 있습니다(8/19 확인).
 - ArUco 마커: `com_navigation/config/aruco_markers.yaml` — 현재 도킹 마커(ID 29)만 등록. 목적지 도착 판정은 마커가 아니라 Nav2 좌표 기반.
 - 도킹 마커 사양: `DICT_4X4_50`, 10cm x 10cm.
 
@@ -500,8 +591,24 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 
 | 문제 | 영향 | 상태 |
 |---|---|---|
+| **(2026-08-19 해결) Nav2 goal 수락 전 취소 유실 — 안전정지 무력화** | 사람/장애물 감지로 정지 판정했는데 **로봇이 목적지까지 완주**. 실기체 실측: 상태머신은 182초 내내 `PERSON_WAIT`인데 로봇은 5.6m를 주행해 목적지에 도착 | `cancel_current_nav_goal()`이 `_nav_goal_handle`이 있을 때만 취소했는데, 그 핸들은 `on_goal_response` 콜백이 와야 채워짐. **Nav2의 accept 응답이 실측 4.1초**나 걸려 그 창에 들어온 취소가 통째로 유실됐음(임무 초반 정지 사유는 거의 매번 해당). `_nav_cancel_requested` 플래그를 두어 핸들을 받는 즉시 취소하도록 수정. accept를 1.5초 지연시키는 가짜 액션 서버로 재현 테스트 작성(`test/offline/itest_cancel_race.py`), 실기체에서 `nav goal 핸들 수신 즉시 취소` 로그로 확인 |
+| **(2026-08-19 해결) `cancel_mission` 후 정지 래치 잔존** | 취소 후 다음 임무에서 **사람이 앞에 있는데 그냥 출발**. 안전정지가 통째로 안 걸림 | `on_cancel_mission`이 상태머신만 READY로 되돌리고 `SafetyMonitor._person_active=True`를 남겨서, 다음 임무에서 `person_present and not self._person_active`가 False가 되어 에지 트리거가 죽었음. `reset_stop_conditions()` 추가 + `on_start_mission`에서 `blocking_reason()`으로 **사람/장애물이 이미 있으면 출발 자체를 거부**하도록 이중 방어. 실기체 확인: `전방에 사람이 감지되어 있습니다 - 해제 후 다시 시도하세요` |
+| **(2026-08-19 해결) HMI가 임무 완료 후 영구 정지** | 임무를 정상 완료하면(`DOCKING→DOCKED→READY`) TFT가 눈 화면(MOVING)에 멈춰 **재부팅 전까지 새 목적지를 못 고름**. 보드의 MOVING 화면엔 자체 타임아웃이 없고(ARRIVED만 5초 후 복귀) MOVING 상태에선 조이스틱 입력도 전부 무시됨 | `hmi_bridge_node`가 `ERROR(0x0A)`만 `S:SELECT`로 메뉴 복귀시키고 `READY(0x02)`/`DOCKED(0x09)`가 빠져 있었음. `MENU_STATE_CODES`로 묶어 해결. 실기체에서 `0x09 → S:SELECT`, `0x02 → S:SELECT` 확인 |
+| **(2026-08-19 해결) 부팅 시 시계 점프로 TF/Nav2가 매번 죽음** | `map→odom`은 물론 `odom→base_footprint`까지 사라져 AMCL은 `active`인데 로컬라이즈 실패, Nav2 costmap은 `Checking transform` 무한 대기. goal을 넣으면 주행 없이 즉시 끝나 **정상처럼 보임**. 매 부팅 100% 재현 | 파이에 RTC가 없어(`RTC time: n/a`) 부팅 시 systemd-timesyncd가 "마지막 기록 시각"으로 복원한 뒤 NTP가 붙으면 크게 점프(실측: 하룻밤 껐다 켜면 **+15.1시간**, 30분이면 +40분). PM2가 그 전에 노드를 띄우면 TF 스탬프가 전부 과거가 되어 tf2 버퍼(10초)가 버림. `run_node.sh`에 **NTP 동기 대기**(최대 60초, 오프라인이면 경고 후 진행 — SR-023) 추가. **⏳ 다음 콜드부팅에서 실효성 검증 필요.** 증상 판별법: `uptime -p`(실제 부팅 경과)와 `pm2 list`의 uptime이 크게 어긋나면 시계 점프 |
+| **(2026-08-19 해결) 아두이노 펌웨어가 파이 코드보다 옛 버전** | 후방 초음파가 **0.50Hz**로만 갱신되어 (1) 장애물 확정에 **8초** 걸리고(0.22m/s에서 **1.76m** 주행 후 정지) (2) `auto_dock_node`의 3cm 폐루프 후진이 구조적으로 불가능(제어 주기 2초 = 8cm씩 이동) | 08-18에 파이 쪽만 10Hz 전제로 바뀌어 있었음(`serial_bridge`의 `R:` 단독 라인 처리, 중앙값 필터, 폐루프 후진) — **펌웨어 업로드가 누락**. `.ino`를 08-18 프로토콜(`R:<cm>,O:<0/1>` 100ms 주기, 통합 텔레메트리는 2초 유지)에 맞춰 수정 후 **파이에서 `arduino-cli`로 업로드**. 실측 0.50→**9.5Hz**, 장애물 확정 **0.96초/0.21m**. 필터는 발행률을 스스로 재서 느리면 얕게(창3+즉시확정), 빠르면 깊게(창5+시간확정) 전환하므로 펌웨어를 되돌려도 안전 |
+| **(2026-08-19 해결) 도킹 목표거리가 0** | 마커 **3cm 앞까지** 밀고 들어가도록 동작 — 10cm 마커는 그 훨씬 전에 화각을 벗어나 검출이 끊기므로 정렬 완료 판정에 **도달 자체가 불가능**하고, 로봇은 이미 도크에 밀착 | `ArucoMarker.distance_error`는 이름과 달리 '오차'가 아니라 마커까지의 **생거리**(`tvec[2]`)인데 그대로 제어 오차로 써서 목표가 0이 됐음. `dock_target_distance`(기본 0.25m) 도입해 `distance_error - target`을 오차로 사용. `auto_dock_node`의 `min_dock_distance`도 독립적으로 0.25였음(교차 검증됨) |
+| **(2026-08-19 해결) 배터리 0V 오독으로 저전압 복귀 오발동** | OpenCR이 배터리 미장착/USB 급전에서 `voltage=0.0`을 발행하면 0%로 환산되어 **주행 중 임무가 중단**됨 | `check_battery`에 하한 가드(6.0V)+NaN 검사 추가. 더해서 전압이 초 단위로 흔들려(같은 충전 상태에서 86~90% 진동) HMI 숫자가 떨리고 모터 부하 순간 강하로 오발동할 수 있던 것을 **EMA 평활화**로 해결(진폭 6%→3%, 단발 강하 무시 확인). HMI 쪽엔 전송 데드밴드도 추가 |
+| **(2026-08-19 해결) 장애물/사람 정지의 교차 복구 버그** | `PERSON_WAIT` 중 장애물이 감지된 뒤 **사람만 먼저 비켜나면 장애물이 그대로인데 주행 재개** | 두 핸들러가 각자 이전 상태를 저장/복원해서 생긴 문제. `_state_before_stop` 하나로 합치고 `_try_resume()`이 **남은 정지 사유가 없을 때만** 재개하도록 수정 |
+| **(2026-08-19 해결) udev 규칙 문법 오류** | 저장소 사본에 `SUBSYSTEM=="tty"`와 쉼표 3개가 빠져 있어, **새 SD카드에 설치하면 udev가 규칙을 통째로 버리고 심볼릭 링크가 안 생김** → 두 시리얼 브릿지가 포트를 못 엶 | 파이에 실제 설치돼 동작 중인 정상 문법본에 맞춰 정정. 저장소 사본과 설치본이 일치함을 확인 |
+| **(2026-08-19 해결) 시리얼 라인 쪼개짐** | `readline()`이 timeout으로 개행 없이 반환해 `J:` / `513,B:0` 으로 갈라져 양쪽 다 파싱 실패(실측 로그). R라인 100ms 도입으로 초당 ~30줄이 되면 더 자주 발생 | 조각 버퍼링 + 포트 개방 직후 첫 개행까지 폐기(커널 버퍼에 남은 이전 세션 조각 대응). 재기동 후 파싱 경고 0건. 단위 테스트 11개 추가 |
+| **(2026-08-19 개선) waypoint `yaw` 무시** | `_send_nav_goal`이 `orientation.w=1.0`을 하드코딩해 yaml에 뭘 적든 항상 map +X 방향으로 도착 | yaw를 쿼터니언으로 변환해 실제 반영. 도킹 지점의 재측정 yaw(85.8°)가 이제 진짜로 쓰입니다 |
+| **(2026-08-19 개선) CPU 부하** | Nav2+비전 동시 구동 시 load 4.45 | `aruco_node`가 카메라 전 프레임(17Hz)을 변환하는데 검출은 5Hz만 소비하던 것을 지연 변환으로 수정(35.5%→25.6%), 카메라 프레임률 제한(camera_node 27.1%→9.6%), costmap 중복 플러그인 제거(global/local 양쪽에서 `obstacle_layer`와 `voxel_layer`가 같은 `/scan`을 이중 처리하고 있었음). **load 4.45→2.5~3.7.** Nav2 자체는 여전히 ~92%로 최대 소비원 |
+| **(2026-08-19 신규) PC와 파이의 소스가 양방향으로 갈라져 있음** | 관제 PC 미러에 git이 없어(로봇에는 있음) 어느 쪽이 최신인지 알 수 없음. 실제로 파이의 08-18 작업(도킹 재설계, 초음파 필터, `rclpy.shutdown()` 가드, `initial_pose` 보정, `auto_dock_node` 신규 등 8개 파일)을 덮어쓰는 사고가 **두 번** 발생(백업으로 복구) | **배포 전 반드시 내용 diff를 볼 것.** md5 비교만으로는 "누구 변경인지" 알 수 없습니다. 날짜 주석(`2026-08-NN`) 집합을 비교하면 상대에만 있는 작업을 빨리 찾을 수 있습니다. 배포 전 파이 백업 필수: `tar czf ~/com_ws_src_backup_$(date +%Y%m%d_%H%M%S).tar.gz --exclude='src/coin_d4_driver' src`. **근본 대책은 PC 쪽도 로봇과 같은 저장소를 clone해서 쓰는 것(미착수).** 로봇 쪽 저장소는 `feature/mission` 브랜치가 `c4900eb`까지 push된 상태이고, 8/19 작업분 23개 파일은 아직 커밋 안 됨 |
+| **(2026-08-19 신규) `pm2 restart` 후 카메라가 안 돌아옴** | 프로세스는 살아있는데 `/camera/image_raw`가 0Hz, aruco 로그에 `카메라 프레임 1.0초 이상 미수신` | libcamera가 장치를 깨끗이 놓지 않는 것으로 추정. **`pm2 restart vision`을 한 번 더** 하면 복구됨 |
+| **(2026-08-19 확인) 저전압 자동복귀(SR-022)가 실질적으로 발동하지 않음** | 배터리 캘리브레이션(12.6V full / 9.0V empty)으로는 임계 20%가 **9.72V**인데, 하드웨어는 11V대에서 OpenCR 통신이 끊겨 먼저 죽음 | 미해결. `battery_voltage_empty`를 11.0V 근처로 올리거나 임계값을 55% 이상으로 조정해야 의미가 생깁니다 |
+| **(2026-08-19 확인) OpenCR이 죽으면 자동 재연결되지 않음** | `/odom`·`/battery_state`가 사라지고 TF가 없어져 Nav2가 아예 못 움직임. 배터리 저전압이 주 원인 | `turtlebot3_node`는 기동 시 한 번만 시리얼을 잡음. **전원 정상화 후 `pm2 restart bringup` 필수** |
 | ~~`/initialpose`가 계속 거부됨~~ (해결) | ~~AMCL이 map→odom을 못 잡아 실제 주행 테스트가 막힘~~ | **2026-08-11 해결.** 원인: AMCL이 `/initialpose` 메시지 처리 시 메시지의 `header.stamp`가 아니라 자기 `now()` 기준으로 tf lookup을 해서, `/odom`이 조금이라도 뒤처져 있으면(항상 그럼) `Failed to transform initial pose in time`으로 거부 - 토픽 기반으로는 구조적으로 이 레이스를 못 피함. **해결책: `nav2_params.yaml`의 amcl 섹션에 `set_initial_pose: true` + `initial_pose.x/y/z/yaw`를 박아서 AMCL 시작 시점에 파라미터로 위치를 줌** - 토픽을 아예 안 타서 레이스 자체가 안 생김. 실측: 재시작 즉시 `Setting pose` 성공, `/amcl_pose` 정상 발행 확인. §8-2 참고. **주의: 현재 좌표는 8/11 테스트 시점 로봇의 실제 위치(1강의실 앞) 기준 임시값 - 운영 시 도킹 지점 좌표로 되돌리거나 매번 실제 시작 위치에 맞게 갱신 필요.** |
-| ~~AMCL이 `map→odom` tf를 지속 갱신 못 함 → Nav2가 실제 이동 없이 "목표 도달"로 오판~~ (해결) | ~~`/start_mission`이 실제로는 로봇이 전혀 안 움직였는데 몇백ms 만에 GUIDING→ARRIVED로 넘어감(2026-08-11 실측, 6m 목적지가 0.65초 만에 "도착" 처리)~~ | **2026-08-18 해결. 진짜 원인은 AMCL tf 적체가 아니라 `set_initial_pose` 좌표가 벽에 파묻혀 있던 것이었음.** 지도(map.pgm)를 직접 파싱해 좌표별 최근접 장애물 거리를 계산한 결과: 기존 `set_initial_pose`(1.079, 0.901)는 **벽에서 0.101m**, `waypoints.yaml`의 docking(0.735, -0.007)은 1.007m, room1은 0.328m. `robot_radius=0.1m`이므로 **AMCL이 믿는 출발점이 그대로 inscribed(치명) 셀**이 되고, Nav2 planner는 출발점이 lethal이면 경로 계산 자체를 거부한다 → 목적지와 무관하게 전부 `status=6 ABORTED`(`GridBased: failed to create plan`). `set_initial_pose`를 docking 좌표로 수정 후 **실주행 전 구간 성공**(room1 77초·복귀 43초·최종 오차 3mm, 거짓 도착 재현 없음). **교훈: planner가 경로를 못 만들면 목적지보다 출발점의 장애물 여유부터 확인할 것.** |
+| ~~AMCL이 `map→odom` tf를 지속 갱신 못 함 → Nav2가 실제 이동 없이 "목표 도달"로 오판~~ (해결) | ~~`/start_mission`이 실제로는 로봇이 전혀 안 움직였는데 몇백ms 만에 GUIDING→ARRIVED로 넘어감(2026-08-11 실측, 6m 목적지가 0.65초 만에 "도착" 처리)~~ | **2026-08-18 해결. 진짜 원인은 AMCL tf 적체가 아니라 `set_initial_pose` 좌표가 벽에 파묻혀 있던 것이었음.** 지도(map.pgm)를 직접 파싱해 좌표별 최근접 장애물 거리를 계산한 결과: 기존 `set_initial_pose`(1.079, 0.901)는 **벽에서 0.101m**, `waypoints.yaml`의 docking(0.735, -0.007)은 1.007m, room1은 0.328m. `robot_radius=0.1m`이므로 **AMCL이 믿는 출발점이 그대로 inscribed(치명) 셀**이 되고, Nav2 planner는 출발점이 lethal이면 경로 계산 자체를 거부한다 → 목적지와 무관하게 전부 `status=6 ABORTED`(`GridBased: failed to create plan`). `set_initial_pose`를 docking 좌표로 수정 후 **실주행 전 구간 성공**(class1 77초·복귀 43초·최종 오차 3mm, 거짓 도착 재현 없음). **교훈: planner가 경로를 못 만들면 목적지보다 출발점의 장애물 여유부터 확인할 것.** |
 | ~~카메라가 기동 1분 후 프레임 발행을 조용히 멈춤~~ (해결) | `camera_node` 프로세스는 살아있고 CPU도 쓰는데 `/camera/image_raw`만 0Hz가 되어 ArUco 도킹이 원천 불가. PM2는 launch 래퍼만 보고 `vision`을 `online`으로 표시해 **조용한 실패**가 됨 | **2026-08-18 해결.** 단계 실험으로 규명 — camera_node 단독은 100초+ 27Hz 안정(하드웨어·드라이버 정상), camera+aruco+Nav2 동시엔 8~28Hz 요동 + 수십초 완전 정지. **원인: 카메라가 ~28fps로 발행하는데 `aruco_node`는 `detection_rate=5Hz`로만 샘플링해 나머지를 전부 버리면서 CPU/DDS 대역만 낭비** → Pi4 4코어에서 Nav2와 겹치면 카메라 파이프라인이 굶음. `aruco.launch.py`의 camera_node에 `FrameDurationLimits: [100000, 100000]`(10fps 고정) 추가로 해결. 실측: 카메라 9.2~10.1Hz 안정, aruco 5.0Hz 유지, load 7.13→5.05, PM2 재기동 후 프레임 미수신 에러 0건 |
 | ~~정상 종료가 exit code 1로 끝나 PM2가 크래시로 오집계~~ (해결) | SIGINT로 정상 종료할 때마다 PM2 재시작 카운터가 소진되어, 한 번 흔들리면 **8개 노드 전체가 `stopped`로 내려감**(8/18 오후 실측) | **2026-08-18 해결.** rclpy 시그널 핸들러가 이미 컨텍스트를 닫은 뒤 `finally: rclpy.shutdown()`이 또 호출되며 `RCLError: rcl_shutdown already called`가 발생하던 것. 전 노드(8개)에 `if rclpy.ok():` 가드 추가 |
 | **(미검증) ArUco 마커(ID 29) 실검출** | 도킹 마지막 단계가 아직 한 번도 성공 검증되지 않음 | 카메라 안정화 후 제자리 360° 스캔했으나 미검출(180샘플 전부 `marker_id: -1`). 프레임 자체는 정상(밝기 176, 포화 0%), 완화 파라미터로도 미검출 → 로봇이 마커를 등졌거나 화각·거리 문제로 추정되나 **배터리 소진으로 검증 중단**. **다음 세션 최우선**: 충전 후 로봇을 마커 정면에 두고 `/aruco_marker`가 29를 잡는지부터 확인할 것. 참고로 로그에 한 번 찍힌 `마커 ID 10 검출`은 물리 마커가 29뿐임을 확인했으므로 `DICT_4X4_50`의 오검출(false positive)임 |
@@ -510,7 +617,7 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 | USB 오디오 동글(Jieli UACDemoV1.0, 스피커) 재생 중 끊김/잡음 | `aplay: write error: No such device` 이후 ALSA가 카드를 아예 못 찾아(`Cannot get card index for 1`) 안내가 깨지거나 통째로 안 들림 | **2026-08-12: 볼륨 100%(유니티 게인)가 원인 중 하나로 확인 - 80%(-6.36dB)로 낮추니 반복 재생에도 끊김 없음(실측, `/tts_request` 실제 파이프라인으로 검증). `voice_node.py`의 `volume` 파라미터 기본값을 80으로 변경.** 단, USB 동글 자체가 여전히 불안정한 하드웨어라는 근본 문제는 남아있음(간헐적 재연결 등) - 완전 해결은 아니고 완화 |
 | 물리 긴급정지 버튼 없음 | 긴급정지 기능이 현재 시스템에 아예 없음 | **2026-08-18 확정: GUI에도 두지 않기로 결정됨**(`com_gui` 코드 주석 근거: HMI-001 6장에 따라 안전기능은 GUI 밖에서 처리). `com_gui`는 실제로 구현 완료됐지만(§5) 긴급정지 버튼은 없음 — 이 프로젝트에서 긴급정지는 최종적으로 미구현 상태로 남음 |
 | `/env_data` 발행자 없음 | 측정 로그 조회가 항상 빈 결과 | 미착수 (온습도+waypoint_id를 묶는 다리 노드 필요) |
-| `WaypointSequencer`의 `trajectory_1`/`trajectory_2` 경유점 시퀀스 미정의 | 출발지→목적지, 목적지→도킹이 경유점 없이 직행(Nav2 자체 경로계획에 의존) | 설계상 문제는 아니나 문서(SR-006)와는 다름 |
+| `WaypointSequencer`의 `trajectory_1`/`trajectory_2` 경유점 시퀀스 미정의 | 출발지→목적지, 목적지→도킹이 경유점 없이 직행(Nav2 자체 경로계획에 의존) | 설계상 문제는 아니나 문서(SR-006)와는 다름. **2026-08-19: 키를 빈 리스트로 명시**해 "직행이 의도"임을 분명히 하고, 기동 시 미사용 경유점 11개를 warn으로 알리도록 함. 실제 복도 경로를 태우려면 좌표 순서를 실측 검증한 뒤 `waypoint_ids`에 나열할 것 |
 | ArUco 도킹 정렬 신뢰성 | 다중 마커 동시 검출 시 잘못된 마커를 보고하던 버그는 수정(2026-08-06)했으나 실물 재검증 필요 | **2026-08-14(추정, 미커밋): 재탐색/재시도 카운터 버그, `marker.yaw_error` 크래시 버그 발견·수정(둘 다 2026-08-18 반영 완료).** **2026-08-18 후반부, 근본 원인 재진단: "15도씩 회전하며 재탐색"하던 기존 방식 자체가 문제였음** — 카메라 파이프라인 지연(Pi4에서 캡처→발행까지 수백 ms)때문에 회전 중 받은 마커 좌표는 이미 "과거의 값"이라, 로봇이 이미 마커를 지나친 뒤에야 인식하는 구조적 결함이 있었음. `DockingController`를 "좌 95도 고정 회전(오도메트리 기반 정밀 제어) → 완전 정지 → 정지 이후 촬영된 프레임만 신뢰해서 판정(stop-and-look)" 방식으로 전면 재설계. 별도로 더 정교한 7단계 상태머신을 가진 `auto_dock_node`도 신규 작성(§5 참고) — 아직 둘 다 **실물 도킹 재검증 전**, git 미커밋 |
 | **(신규, 2026-08-18) `/cmd_vel` 발행 주체 3개 충돌 위험** | Nav2(controller_server), `service_manager`의 `DockingController`, `auto_dock_node`가 전부 `/cmd_vel`을 발행할 수 있음 - 나중에 도착한 메시지가 이기는 구조라 두 개 이상이 동시에 다른 값을 쏘면 로봇이 떨리거나 엉뚱하게 움직일 위험 | `auto_dock_node`는 기동 직후 IDLE 상태라 아무것도 안 쏴서 띄워두는 것 자체는 안전하나, **`/start_docking` 호출 시점에 Nav2 주행이나 `service_manager`의 DOCKING 단계가 동시에 돌지 않도록 반드시 배타적으로 관리할 것**(운영 시 DockingController와 auto_dock_node 둘 중 하나만 사용). 정리 방향(미착수): DockingController를 없애고 service_manager가 `/start_docking`을 호출한 뒤 `/docking_state`의 DONE/FAILED를 구독해 임무를 이어가는 구조로 통합 |
 | ~~PM2 미도입~~ (해결) | ~~노드 비정상 종료 시 자동 재시작 없음~~ | **2026-08-11 도입, 2026-08-12 실측 확인.** `com_launch/ecosystem.config.js` + `pm2-com.service`로 전원 인가 시 8개 노드 자동 기동 + 노드별 최대 3회 자동 재시작(SR-026). `pm2 save` 저장 상태가 "전부 stopped"면 재부팅해도 자동 기동 안 될 수 있으니 부팅 후 `pm2 list` 확인 습관 필요. 운영 주의사항은 §11 참고 |
@@ -532,4 +639,24 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 - `com_interfaces`(RobotState/ArucoMarker/EnvData/StartMission 등 메시지 정의)
 - 통합 테스트(8/3, 8/4, 8/5, 8/6 진행) 및 시험 결과 기록, 발표 리허설(8/13~8/14 예정)
 
-> 상세 일일 진행 상황은 `docs/worklog/` 폴더의 작업일지를 참고하세요.
+---
+
+## 14. 정식 요구사항·설계 문서
+
+제출용 정식 문서는 `docs/requirements/`에 있습니다. 이 README가 **"지금 실제로 이렇게 동작한다"**를 적는 문서라면, 아래 7종은 **"이렇게 하기로 했다"**를 적는 문서입니다. 둘이 어긋나면 README(실측 기준)가 맞습니다.
+
+**2026-08-19 개정에서 7종 전부를 이날 기준으로 갱신했습니다.** 각 문서 앞머리의 **개정 이력 표 마지막 행**만 읽으면 그 문서에서 무엇이 바뀌었는지 알 수 있습니다.
+
+| 파일 | 문서번호 | 현재 버전 | 8/19 개정에서 반영한 것 |
+|---|---|---|---|
+| `01_사용자요구사항명세서.docx` | URS-001 | 2.8 | 목적지 ID 변경, 안전 정지 결함 3건, UR-017(저전압 복귀)이 실질적으로 발동하지 않는 이유 |
+| `02_시스템요구사항명세서.docx` | SRS-001 | 2.8 | SR-004 응답시간 실측(8초 → 0.96초), SR-016 ID, SR-022/SR-023/SR-024 현황 |
+| `03_시스템아키텍처문서.docx` | SAD-001 | 2.8 | 기동 시 NTP 대기, 코스트맵 중복 제거로 load 4.45→2.5~3.7, udev 규칙 문법 정정 |
+| `04_시스템소프트웨어설계서.docx` | SDD-001 | 3.0 | 목적지 ID, trajectory 빈 리스트 명시, 상태 전이 결함 3건, 도킹 목표거리, yaw 반영 |
+| `05_상세설계명세서.docx` | DDS-001 | 3.0 | 노드별 상세: `dock_target_distance`, 시간 기반 장애물 확정, 시리얼 조각 버퍼링, `max_ultrasonic_interval` |
+| `06_GUI_HMI설계서.docx` | HMI-001 | 2.6 | 목적지 ID와 **라벨 불일치 주의**, 임무 완료 후 화면 영구 정지 버그, 배터리 표시 안정화 |
+| `07_인터페이스명세서.docx` | ICD-001 | 2.7 | IF-007 발행 주기 2초→10Hz, IF-016 메뉴 복귀 상태코드 확대, IF-017 destination_id |
+
+`00_시나리오.md`는 7월 말에 쓴 초기 시나리오 원본으로, 본문은 그대로 두고 앞머리에 날짜별 "실제 구현과의 차이" 노트를 덧붙이는 방식으로 관리합니다(2026-08-19 노트 포함).
+
+> `.docx`는 바이너리라 diff가 안 보입니다. 내용을 빠르게 확인하려면 `python3 -c "import docx; [print(p.text) for p in docx.Document('파일.docx').paragraphs]"` 식으로 텍스트만 뽑아 보세요. 편집은 표 서식이 깨지기 쉬우니 **개정 이력 행 추가 + 해당 문장만 치환**하는 식으로 최소 변경할 것.
