@@ -18,7 +18,7 @@ launch가 내부적으로 자식 프로세스를 관리하는 방식이라 그 �
 (bash가 여러 `&`/`disown`을 기다리며 멈추는 상황이 아님). 다만 완전히
 분리해서 백그라운드로 띄우고 싶으면 다음과 같이 실행:
  
-  setsid nohup ros2 launch com_launch robot_all_launch.py \
+  setsid nohup ros2 launch com_launch robot_all.launch.py \
       > ~/com_launch.log 2>&1 < /dev/null &
  
 주의:
@@ -27,13 +27,13 @@ launch가 내부적으로 자식 프로세스를 관리하는 방식이라 그 �
   넣어주지만, launch 프로세스 시작 전에 export 해두는 쪽이 더 안전하다).
 - 배터리 11V대(저전압)에서는 OpenCR이 약 90초 후 시리얼 통신 실패로 크래시하는
   현상이 실측됐다 (README §8-1) — 완충 후 기동할 것.
-- hmi_bridge_node의 serial_port 기본값이 com_sensor_bridge_node와 겹쳐서
-  (둘 다 /dev/ttyACM0) 반드시 /dev/ttyACM2로 오버라이드해야 한다.
-  실제 포트가 다르면 hmi_serial_port 인자로 바꿔서 실행할 것:
-    ros2 launch com_launch robot_all_launch.py hmi_serial_port:=/dev/ttyACM3
+- 시리얼 포트는 udev 고정 링크(/dev/com_sensorboard, /dev/com_tftboard)를 쓰므로
+  평소엔 오버라이드가 필요 없다. 새 라즈베리파이라 udev 규칙이 아직 없다면
+  ttyACM 번호를 직접 넘길 것:
+    ros2 launch com_launch robot_all.launch.py hmi_serial_port:=/dev/ttyACM2
 - 임무 시작은 TFT+조이스틱 물리 UI 또는:
     ros2 service call /start_mission com_interfaces/srv/StartMission \
-      "{destination_id: room1}"
+      "{destination_id: class1}"
  
 [/cmd_vel 발행자 충돌 주의 - 2026-08-18]
   이 launch에는 /cmd_vel을 발행할 수 있는 주체가 셋이다:
@@ -96,11 +96,14 @@ def generate_launch_description():
                                             'coin_d4_driver를 자동 포함'),
         DeclareLaunchArgument('map', default_value=default_map),
         DeclareLaunchArgument('params_file', default_value=default_params),
-        DeclareLaunchArgument('sensor_serial_port', default_value='/dev/ttyACM0',
+        # 2026-08-19: udev 규칙(com_launch/udev/99-com-robot-serial.rules)이
+        # 시리얼 번호 기준으로 만들어주는 고정 심볼릭 링크를 쓴다. ttyACM 번호는
+        # 재부팅/재연결마다 바뀌므로 여기에 ttyACM0/2를 박아두면 두 보드가 뒤바뀐다
+        # (노드 기본값과 ecosystem.config.js는 이미 고정 경로를 쓰고 있었다).
+        DeclareLaunchArgument('sensor_serial_port', default_value='/dev/com_sensorboard',
                                description='com_sensor_bridge_node (메인센서보드)'),
-        DeclareLaunchArgument('hmi_serial_port', default_value='/dev/ttyACM2',
-                               description='hmi_bridge_node (TFT보드) - 반드시 '
-                                            'com_sensor_bridge_node와 다른 포트'),
+        DeclareLaunchArgument('hmi_serial_port', default_value='/dev/com_tftboard',
+                               description='hmi_bridge_node (TFT보드)'),
         DeclareLaunchArgument('auto_dock_params', default_value=default_dock_params,
                                description='auto_dock_node 파라미터 파일 '
                                             '(마커 ID, 제어 게인, 후진 오프셋 등)'),

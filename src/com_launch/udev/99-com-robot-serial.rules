@@ -17,5 +17,13 @@
 # /dev/bus/usb/... 같은 저수준 경로를 가리키는 문제가 실측됨(2026-08-11, 케이블
 # 재연결 후에도 재현). 이 플래그로 ModemManager가 애초에 건드리지 않게 함.
 
-ATTRS{idVendor}=="2341" ATTRS{idProduct}=="0043" ATTRS{serial}=="1344B435234351D03947", ENV{ID_MM_DEVICE_IGNORE}="1", MODE:="0666" SYMLINK+="com_sensorboard"
-ATTRS{idVendor}=="2341" ATTRS{idProduct}=="0043" ATTRS{serial}=="1344B435234351D0E837", ENV{ID_MM_DEVICE_IGNORE}="1", MODE:="0666" SYMLINK+="com_tftboard"
+# 2026-08-19 수정: 이 저장소 사본은 udev 문법이 깨져 있었다.
+#   (1) 키-값 쌍 사이 쉼표 누락 (idVendor/idProduct/serial 사이, MODE와 SYMLINK 사이)
+#   (2) SUBSYSTEM=="tty" 누락 - 없으면 같은 USB 장치의 tty가 아닌 노드에도 매칭을
+#       시도한다
+# udev는 쉼표가 빠지면 규칙 줄 전체를 파싱 실패로 버리므로, 이 파일을 그대로
+# 설치하면 심볼릭 링크가 아예 안 생기고 두 브릿지 노드가 포트를 못 연다.
+# 파이에 실제로 설치돼 동작 중인 /etc/udev/rules.d/99-com-robot-serial.rules 의
+# 내용(정상 문법)에 맞춰 정정했다. 설치본과 이 사본이 이제 일치한다.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0043", ATTRS{serial}=="1344B435234351D03947", ENV{ID_MM_DEVICE_IGNORE}="1", MODE:="0666", SYMLINK+="com_sensorboard"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0043", ATTRS{serial}=="1344B435234351D0E837", ENV{ID_MM_DEVICE_IGNORE}="1", MODE:="0666", SYMLINK+="com_tftboard"
