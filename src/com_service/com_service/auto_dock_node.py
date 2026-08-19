@@ -168,6 +168,12 @@ class AutoDockNode(Node):
         self.declare_parameter('ultrasonic_min_valid', 0.02)
         self.declare_parameter('ultrasonic_max_valid', 2.0)
         self.declare_parameter('target_gap', 0.03)           # m
+        # 2026-08-19: 초음파 폐루프 후진이 성립하려면 센서가 충분히 자주 와야 한다.
+        # 실측 결과 아두이노는 2초 주기(0.50Hz)로 보내는데, 그 상태에서 후진하면
+        # 제어 판단 사이에 reverse_speed x 2초 = 8cm씩 움직인다(목표 간격 3cm,
+        # 허용오차 0.5cm). 값을 못 받는 사이 그대로 벽에 박을 수 있으므로,
+        # 이 간격보다 느리면 도킹 시작 자체를 거부한다.
+        self.declare_parameter('max_ultrasonic_interval', 0.5)   # s
         self.declare_parameter('gap_tolerance', 0.005)
         self.declare_parameter('reverse_speed', 0.04)
         self.declare_parameter('reverse_min_speed', 0.015)
@@ -233,6 +239,7 @@ class AutoDockNode(Node):
  
         self.us_buffer = deque(maxlen=5)
         self.us_stamp = None
+        self.us_interval = None      # 유효 수신 간격 EMA (발행률 자가 진단용)
         self.rear_obstacle = False
  
         self.nav_goal_handle = None
@@ -298,6 +305,7 @@ class AutoDockNode(Node):
         self.ultrasonic_min_valid = g('ultrasonic_min_valid')
         self.ultrasonic_max_valid = g('ultrasonic_max_valid')
         self.target_gap = g('target_gap')
+        self.max_ultrasonic_interval = g('max_ultrasonic_interval')
         self.gap_tolerance = g('gap_tolerance')
         self.reverse_speed = g('reverse_speed')
         self.reverse_min_speed = g('reverse_min_speed')
@@ -343,8 +351,14 @@ class AutoDockNode(Node):
         # 그걸 그대로 믿으면 "벽이 뒤에 있다"고 착각하거나 영원히 후진한다.
         if not (self.ultrasonic_min_valid <= value <= self.ultrasonic_max_valid):
             return
+        now = self.get_clock().now()
+        if self.us_stamp is not None:
+            dt = (now - self.us_stamp).nanoseconds / 1e9
+            # 첫 값은 그대로, 이후엔 지수이동평균 (튄 간격 하나에 안 흔들리게)
+            self.us_interval = dt if self.us_interval is None else \
+                0.3 * dt + 0.7 * self.us_interval
         self.us_buffer.append(value)
-        self.us_stamp = self.get_clock().now()
+        self.us_stamp = now
  
     def on_rear_obstacle(self, msg: Bool):
         self.rear_obstacle = msg.data
@@ -368,6 +382,25 @@ class AutoDockNode(Node):
             )
             self.get_logger().warn(response.message)
             return response
+        # 후진 단계는 초음파 폐루프다. 센서가 너무 느리면 벽에 박으므로 시작을 막는다.
+        if self.us_interval is None:
+            response.success = False
+            response.message = (
+                f'후방 초음파({self.ultrasonic_topic}) 수신이 없어 도킹을 시작할 수 '
+                '없습니다 - 센서보드 연결을 확인하세요')
+            self.get_logger().warn(response.message)
+            return response
+        if self.us_interval > self.max_ultrasonic_interval:
+            response.success = False
+            response.message = (
+                f'후방 초음파 수신 간격이 {self.us_interval:.2f}s로 너무 깁니다 '
+                f'(허용 {self.max_ultrasonic_interval:.2f}s). 이 상태로 후진하면 '
+                f'제어 판단 사이에 {self.reverse_speed * self.us_interval * 100:.0f}cm씩 '
+                '움직여 벽에 충돌합니다. 아두이노 텔레메트리 주기를 줄인 뒤 다시 '
+                '시도하세요(arduino/flaem_pir_dht11_jul31a.ino, TELEMETRY_INTERVAL).')
+            self.get_logger().error(response.message)
+            return response
+
         self._enter_state(State.TURN_LEFT_90 if self.skip_navigation
                           else State.NAV_TO_DOCK)
         response.success = True
