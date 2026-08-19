@@ -11,9 +11,25 @@
   IR/PIR/긴급정지버튼/배터리전압/조도센서는 프로젝트 범위 제외(2026-08-04 확정) -
   이 보드에서 아예 안 읽음.
 
+  2026-08-19: 후방 초음파(R/O)를 별도 라인으로 분리해 100ms 주기로 보낸다.
+  [이유] 2초 제약은 DHT11(온습도)에만 해당하는데 초음파까지 같은 패킷에 묶여 있어서
+  후방 거리 정보가 0.5Hz로만 갱신됐다. 그 결과
+    - service_manager 의 장애물 확정이 몇 초씩 걸려 정지가 늦었고(실측 8초, 1.7m)
+    - auto_dock_node 의 초음파 폐루프 후진은 제어 주기가 2초라 성립 자체가 안 됐다
+      (갱신 사이에 8cm 이동 - 목표 간격은 3cm).
+  [설계] 파이 쪽 serial_bridge_node.py 는 2026-08-18에 이미 "R:<cm>,O:<0/1>" 단독
+  라인을 받도록 되어 있었다(parse_and_publish_rear). 펌웨어만 안 올라가 있었을 뿐이라
+  그 프로토콜에 맞춘다. 기존 T/H/F/R/O 통합 텔레메트리는 2초 주기로 그대로 둔다
+  (호환성 유지 - 브릿지가 둘 다 처리한다).
+  [대역폭] 9600 baud = 약 960 B/s.
+    조이스틱 약 12B x 20Hz = 240 B/s
+    R 라인   약 12B x 10Hz = 120 B/s
+    텔레메트리 약 40B x 0.5Hz = 20 B/s   -> 합계 약 380 B/s (40%) 로 여유 있음.
+
   ROS 쪽 라인 프로토콜 (com_sensors/serial_bridge_node.py 와 반드시 일치해야 함):
-    텔레메트리(2초 주기, DHT11 제약) : "T:25.0,H:60.0,F:0,R:15.3,O:1"
-    조이스틱(약 50ms 주기)         : "J:154,B:1"
+    텔레메트리(2초 주기)    : "T:25.0,H:60.0,F:0,R:15.3,O:1"
+    후방거리(100ms 주기)    : "R:15.3,O:1"
+    조이스틱(약 50ms 주기)  : "J:154,B:1"
 */
 
 #include <DHT.h>
@@ -32,6 +48,10 @@ DHT dht(DHT_PIN, DHT_TYPE);
 
 unsigned long lastTelemetryTime = 0;
 const unsigned long TELEMETRY_INTERVAL = 2000; // DHT11은 2초 이상 간격 필요
+
+// 2026-08-19: 후방 거리만 따로 자주 보낸다 (파일 상단 주석 참고).
+unsigned long lastRearTime = 0;
+const unsigned long REAR_INTERVAL = 100;
 
 unsigned long lastJoyTime = 0;
 const unsigned long JOY_INTERVAL = 50;
@@ -54,6 +74,11 @@ void loop() {
     sendJoystick();
   }
 
+  if (now - lastRearTime >= REAR_INTERVAL) {
+    lastRearTime = now;
+    sendRear();
+  }
+
   if (now - lastTelemetryTime >= TELEMETRY_INTERVAL) {
     lastTelemetryTime = now;
     sendTelemetry();
@@ -67,8 +92,11 @@ float readDistanceCm() {
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  // 30ms 타임아웃 -> 약 5m 이상은 미검출로 처리 (pulseIn 0 반환)
-  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 30000UL);
+  // 2026-08-19: 100ms 주기로 부르므로 타임아웃을 30ms -> 15ms 로 줄였다.
+  // 15ms면 약 2.5m 까지 측정 가능한데, 이 프로젝트가 쓰는 범위(장애물 20cm,
+  // 도킹 후진 3cm, auto_dock ultrasonic_max_valid 2.0m)엔 충분하다.
+  // 30ms를 그대로 두면 미검출 시 매 주기 30%를 블로킹해 조이스틱까지 밀린다.
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 15000UL);
   if (duration == 0) return -1.0;  // 미검출
   return duration / 58.0;          // 왕복시간(us) -> cm
 }
@@ -80,6 +108,16 @@ void sendJoystick() {
   Serial.print(x);
   Serial.print(",B:");
   Serial.println(btn);
+}
+
+// 2026-08-19: 후방 거리 단독 라인. serial_bridge_node.parse_and_publish_rear 가 받는다.
+void sendRear() {
+  float distance = readDistanceCm();
+  int obstacle = (distance >= 0 && distance <= OBSTACLE_THRESHOLD_CM) ? 1 : 0;
+  Serial.print("R:");
+  Serial.print(distance, 1);
+  Serial.print(",O:");
+  Serial.println(obstacle);
 }
 
 void sendTelemetry() {

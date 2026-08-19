@@ -11,6 +11,8 @@
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>com_interfaces</depend>
+  <!-- 2026-08-19: 코드에서 import 하는데 선언이 빠져 있던 의존성 -->
+  <depend>python3-serial</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

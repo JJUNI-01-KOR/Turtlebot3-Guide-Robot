@@ -57,6 +57,15 @@ class SensorBridgeNode(Node):
         self.joystick_x_pub = self.create_publisher(Int32, '/com_sensors/joystick_x', sensor_qos)
         self.joystick_button_pub = self.create_publisher(Bool, '/com_sensors/joystick_button', sensor_qos)
  
+        self._rx_buf = b''      # 개행이 아직 안 온 조각 (read_serial_callback 참고)
+        # 2026-08-19: 포트를 열면 커널 입력버퍼에 이전 세션의 바이트가 남아 있을 수
+        # 있어서, 첫 read가 라인 중간부터 시작한다(실측: '패킷 파싱 실패: 513,B:0'
+        # - "J:513,B:0" 의 뒤토막). 첫 개행을 볼 때까지는 조각을 버려서 동기를 맞춘다.
+        self._line_synced = False
+        try:
+            self.ser.reset_input_buffer()
+        except Exception as e:
+            self.get_logger().warn(f'입력 버퍼 비우기 실패(무시하고 진행): {e}')
         self.timer = self.create_timer(0.05, self.read_serial_callback)
  
     def _open_serial_with_retry(self, port, baud, max_retries=5, retry_delay_sec=2.0):
@@ -101,32 +110,76 @@ class SensorBridgeNode(Node):
         # 이 보드(CDC-ACM)에서 ioctl 오류가 나서 못 쓰므로(위 2026-08-12 메모),
         # readline()이 빈 문자열(제한시간 내 개행 없음 = 더 읽을 게 없음)을
         # 반환할 때까지 한 틱 안에서 반복해서 비운다. 상한은 무한루프 방지용.
+        # 2026-08-19: readline()은 timeout(0.05s) 안에 개행을 못 만나면 그때까지
+        # 읽은 만큼을 그대로 돌려준다. 그래서 라인이 읽기 경계에서 쪼개지면
+        # 앞토막("J:")과 뒤토막("513,B:0")이 각각 한 줄처럼 올라와 둘 다 파싱에
+        # 실패했다(실측 로그: "패킷 파싱 실패, 무시함: 513,B:0"). 아두이노를
+        # R라인 100ms 주기로 바꾸면 초당 ~30줄이라 더 자주 터진다.
+        # 개행이 아직 안 온 조각은 _rx_buf에 들고 있다가 다음 조각과 이어붙인다.
         for _ in range(20):
             try:
-                line = self.ser.readline().decode('utf-8').strip()
-            except UnicodeDecodeError:
-                self.get_logger().warn('시리얼 데이터 디코딩 실패, 무시함')
-                continue
+                raw = self.ser.readline()
             except OSError as e:
                 self.get_logger().error(
                     f'센서보드 시리얼 읽기 실패: {e} (USB 연결 확인 필요, 다음 주기에 재시도)',
                     throttle_duration_sec=5.0
                 )
+                self._rx_buf = b''
+                self._line_synced = False   # 재연결 시 다시 동기 맞추기
                 return
 
-            if not line:
+            if not raw:
                 return  # 더 읽을 데이터 없음 - 이번 틱 종료
 
-            if line.startswith('J:'):
-                self.parse_and_publish_joystick(line)
-            elif line.startswith('R:'):
-                # 2026-08-18: 초음파 단독 라인(100ms 주기). 기존엔 초음파가 2초 주기
-                # 텔레메트리에만 실려 있어서 auto_dock_node의 3cm 폐루프 후진이
-                # 성립하지 않았다(갱신 사이에 8cm 이동). 아두이노가 "R:15.3,O:1"을
-                # 따로 보내도록 바꿨고, 여기서 그 라인을 받는다.
-                self.parse_and_publish_rear(line)
-            else:
-                self.parse_and_publish(line)
+            self._rx_buf += raw
+
+            if not self._line_synced:
+                # 첫 개행 전까지는 라인 중간부터 시작한 조각이므로 통째로 버린다.
+                idx = self._rx_buf.find(b'\n')
+                if idx < 0:
+                    if len(self._rx_buf) > 4096:
+                        self._rx_buf = b''
+                    continue
+                self._rx_buf = self._rx_buf[idx + 1:]
+                self._line_synced = True
+                if not self._rx_buf:
+                    continue
+
+            if not self._rx_buf.endswith(b'\n'):
+                # 개행 전에 timeout - 라인이 쪼개졌다. 다음 조각을 기다린다.
+                if len(self._rx_buf) > 4096:
+                    self.get_logger().warn('시리얼 수신 버퍼 과다 - 조각 폐기')
+                    self._rx_buf = b''
+                continue
+
+            pending, self._rx_buf = self._rx_buf, b''
+            for part in pending.split(b'\n'):
+                try:
+                    line = part.decode('utf-8').strip()
+                except UnicodeDecodeError:
+                    self.get_logger().warn('시리얼 데이터 디코딩 실패, 무시함')
+                    continue
+                if line:
+                    self._dispatch_line(line)
+
+    def _dispatch_line(self, line: str):
+        """완성된 한 줄을 종류별로 처리한다."""
+        if line.startswith('J:'):
+            self.parse_and_publish_joystick(line)
+        elif line.startswith('['):
+            # 2026-08-19: 아두이노가 보내는 사람용 상태 메시지("[센서보드] 시작됨",
+            # "[센서보드] DHT11 읽기 실패..." 등). 예전엔 이것도 텔레메트리로
+            # 파싱하려다 실패해 WARN을 찍었고(실측 29건), 진짜 파싱 실패가
+            # 그 안에 묻혔다. 보드 로그로 남기되 경고로 취급하지 않는다.
+            self.get_logger().info(f'[센서보드 메시지] {line}')
+        elif line.startswith('R:'):
+            # 2026-08-18: 초음파 단독 라인(100ms 주기). 기존엔 초음파가 2초 주기
+            # 텔레메트리에만 실려 있어서 auto_dock_node의 3cm 폐루프 후진이
+            # 성립하지 않았다(갱신 사이에 8cm 이동). 아두이노가 "R:15.3,O:1"을
+            # 따로 보내도록 바꿨고, 여기서 그 라인을 받는다.
+            self.parse_and_publish_rear(line)
+        else:
+            self.parse_and_publish(line)
  
     def parse_and_publish_joystick(self, line: str):
         try:
