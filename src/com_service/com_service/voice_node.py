@@ -16,11 +16,25 @@ from com_interfaces.msg import TtsRequest
 
 
 class VoiceNode(Node):
+    @staticmethod
+    def _default_audio_path():
+        """패키지 share의 audio/. 설치 전이거나 못 찾으면 소스 트리로 폴백."""
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            share_audio = os.path.join(
+                get_package_share_directory('com_service'), 'audio')
+            if os.path.isdir(share_audio):
+                return share_audio
+        except Exception:
+            pass
+        return os.path.expanduser('~/com_ws/src/com_service/audio')
+
     def __init__(self):
         super().__init__('voice_node')
 
-        self.declare_parameter('audio_library_path',
-                                os.path.expanduser('~/com_ws/src/com_service/audio'))
+        # 2026-08-19: 기본값을 패키지 share의 audio/로. 예전 기본값은 소스 트리
+        # 절대경로여서 워크스페이스 위치나 계정이 바뀌면 조용히 무음이 됐다.
+        self.declare_parameter('audio_library_path', self._default_audio_path())
         # 2026-08-12 실측: 100%(-0.94dB, 유니티 게인)에서 USB 오디오 동글(Jieli
         # UACDemoV1.0)이 재생 중 끊김/치직거림(aplay write error: No such device,
         # 이후 ALSA가 카드 자체를 못 찾음)을 반복 유발함 - 30%는 재생은 안정적이나

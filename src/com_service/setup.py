@@ -12,6 +12,9 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        # 2026-08-19: 안내 음성. 예전엔 설치가 안 돼서 voice_node가 소스 트리
+        # 경로를 직접 읽고 있었고, 워크스페이스를 옮기면 조용히 무음이 됐다.
+        (os.path.join('share', package_name, 'audio'), glob('audio/*.wav')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
