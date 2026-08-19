@@ -13,6 +13,8 @@
   <depend>geometry_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>com_interfaces</depend>
+  <!-- 2026-08-19: 코드에서 import 하는데 선언이 빠져 있던 의존성 -->
+  <depend>ament_index_python</depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
 

@@ -18,6 +18,7 @@ DDS-001(상세설계명세서) 2.4절 aruco 노드 스펙 구현.
 """
 
 import math
+import os
 import time
 
 import cv2
@@ -179,7 +180,7 @@ class PersonPresenceChecker:
 
 
 class FrameSampler:
-    """카메라 콜백은 항상 최신 프레임만 저장, 타이머가 detection_rate 주기로 꺼내씀."""
+    """카메라 콜백은 항상 최신 프레임(원본 Image 메시지)만 저장, 타이머가 꺼내 씀."""
 
     def __init__(self):
         self._latest_frame = None
@@ -208,10 +209,16 @@ class ArucoNode(Node):
         self.declare_parameter('person_detection_rate', 1.0)      # Hz
         self.declare_parameter('person_confidence_threshold', 0.5)
         self.declare_parameter('camera_frame_timeout', 1.0)       # sec (SR-025)
-        self.declare_parameter(
-            'camera_calibration_file',
-            '/home/com/.ros/camera_info/imx219__base_soc_i2c0mux_i2c_1_imx219_10_640x480.yaml'
-        )
+        # 2026-08-19: 기본값을 패키지 share의 사본으로 바꿨다. 홈 절대경로는 그 파일이
+        # 없으면(계정이 다르거나 SD카드를 새로 깔면) 경고 한 줄만 남기고 조용히
+        # 추정값(fx=600)으로 폴백하는데, 실제 캘리브레이션은 fx=1335라 2.2배 차이가
+        # 나고 solvePnP 거리(=도킹 제어 입력)가 그대로 2.2배 어긋난다.
+        # launch에서 명시적으로 넘기면 그 값이 우선한다.
+        self.declare_parameter('camera_calibration_file', '')
+        # 카메라가 거꾸로 장착돼 있어 프레임을 180도 회전시킨다. 회전하면 주점(cx, cy)도
+        # 같이 옮겨가므로 캘리브레이션 값을 반드시 보정해야 한다
+        # (_apply_rotation_to_intrinsics 참고).
+        self.declare_parameter('rotate_180', True)
         self.declare_parameter('markers_yaml_package', 'com_navigation')
         self.declare_parameter('markers_yaml_relpath', 'config/aruco_markers.yaml')
 
@@ -221,6 +228,8 @@ class ArucoNode(Node):
         self.person_detection_period = 1.0 / self.get_parameter('person_detection_rate').value
         person_threshold = self.get_parameter('person_confidence_threshold').value
         self.camera_timeout = self.get_parameter('camera_frame_timeout').value
+        # 아래 주점 보정과 반드시 같은 값을 봐야 하므로 한 번만 읽어둔다.
+        self.rotate_180 = self.get_parameter('rotate_180').value
 
         camera_matrix, dist_coeffs = self._load_camera_calibration()
         self.known_marker_ids = self._load_known_marker_ids()
@@ -262,9 +271,48 @@ class ArucoNode(Node):
 
     # ── 초기화 헬퍼 ──
 
+    def _default_calibration_path(self):
+        """패키지 share에 설치된 캘리브레이션 파일 (setup.py가 config/*.yaml 설치)."""
+        try:
+            share = get_package_share_directory('com_vision')
+        except Exception:
+            return None
+        cfg_dir = os.path.join(share, 'config')
+        if not os.path.isdir(cfg_dir):
+            return None
+        cands = sorted(f for f in os.listdir(cfg_dir) if f.endswith('.yaml'))
+        return os.path.join(cfg_dir, cands[0]) if cands else None
+
+    def _apply_rotation_to_intrinsics(self, camera_matrix, width, height):
+        """preprocess_image가 프레임을 180도 회전시키므로 주점(cx, cy)도 같이 옮긴다.
+
+        180도 회전은 픽셀 (u, v)를 (W-1-u, H-1-v)로 보내므로 회전된 영상의 주점은
+        (W-1-cx, H-1-cy)다. 2026-08-19 이전엔 이 보정이 없어 원본 기준 cx를 회전된
+        영상에 그대로 썼다. 실측 캘리브레이션(cx=353.02, W=640)에서 오차는 66px이고
+        lateral_error 편향으로 그대로 넘어간다: bias = 66 * Z / 1335.
+        도킹 목표 0.25m에서 약 1.2cm - lateral_tolerance(2cm)의 60%를 잡아먹는다.
+        """
+        if not self.rotate_180:
+            return camera_matrix
+        if not width or not height:
+            self.get_logger().warn(
+                '캘리브레이션에 image_width/height가 없어 180도 회전 주점 보정을 '
+                '건너뜁니다 - lateral_error에 편향이 남습니다')
+            return camera_matrix
+        corrected = camera_matrix.copy()
+        cx, cy = corrected[0, 2], corrected[1, 2]
+        corrected[0, 2] = (width - 1) - cx
+        corrected[1, 2] = (height - 1) - cy
+        self.get_logger().info(
+            f'180도 회전 주점 보정: cx {cx:.2f}->{corrected[0, 2]:.2f}, '
+            f'cy {cy:.2f}->{corrected[1, 2]:.2f}')
+        return corrected
+
     def _load_camera_calibration(self):
         """camera_calibration_file 파라미터로 캘리브레이션 로드. 없으면 기본 추정값 사용."""
         path = self.get_parameter('camera_calibration_file').value
+        if not path:
+            path = self._default_calibration_path()
         if path:
             try:
                 with open(path, 'r') as f:
@@ -282,6 +330,8 @@ class ArucoNode(Node):
                     dc['data'], dtype=np.float64
                 ).reshape(dc['rows'], dc['cols'])
 
+                camera_matrix = self._apply_rotation_to_intrinsics(
+                    camera_matrix, calib.get('image_width'), calib.get('image_height'))
                 self.get_logger().info(f'카메라 캘리브레이션 로드 완료: {path}')
                 return camera_matrix, dist_coeffs
             except Exception as e:
@@ -318,16 +368,29 @@ class ArucoNode(Node):
         self._mission_state = msg.data
 
     def preprocess_image(self, msg: Image):
-        """카메라 콜백: BGR 프레임으로 변환해 최신 프레임 버퍼에 저장만 함 (검출은 타이머가 수행)."""
+        """카메라 콜백: 원본 메시지만 최신 버퍼에 넣는다 (변환·회전은 타이머가 수행).
+
+        2026-08-19: 예전엔 여기서 매 프레임 imgmsg_to_cv2 + rotate를 했는데, 카메라는
+        약 17Hz로 들어오고 검출 타이머는 5Hz만 소비하므로 3분의 2가 버려지는
+        작업이었다(실측: 프레임률이 오르자 이 노드 CPU가 9.9%->35.5%로 뛰었고,
+        이 변경으로 25.6%까지 내려갔다). 실제로 쓰는 프레임 하나만 변환한다.
+        """
+        self._last_frame_time = time.monotonic()
+        self.sampler.update(msg, msg.header.stamp)
+
+    def _decode_frame(self, msg: Image):
+        """실제로 검출에 쓸 프레임 하나만 BGR로 변환하고 회전시킨다."""
         try:
             frame_bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            # libcamera 0.1은 orientation 파라미터 미지원 → 카메라 장착 방향 보정용 180도 회전
-            frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
+            # libcamera 0.1은 orientation 파라미터 미지원 → 카메라 장착 방향 보정용
+            # 180도 회전. 이 회전을 켜고 끌 때 캘리브레이션 주점 보정도 함께 바뀐다
+            # (_apply_rotation_to_intrinsics) - rotate_180 파라미터 하나로 묶여 있다.
+            if self.rotate_180:
+                frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
+            return frame_bgr
         except Exception as e:
             self.get_logger().error(f'이미지 변환 실패: {e}')
-            return
-        self._last_frame_time = time.monotonic()
-        self.sampler.update(frame_bgr, msg.header.stamp)
+            return None
 
     def _on_timer(self):
         """detection_rate(기본 5Hz) 주기로 최신 프레임에 대해 마커/사람 검출 수행."""
@@ -353,7 +416,10 @@ class ArucoNode(Node):
             return
         self._error_reported = False
 
-        frame_bgr, stamp = self.sampler.get_latest()
+        msg, stamp = self.sampler.get_latest()
+        if msg is None:
+            return
+        frame_bgr = self._decode_frame(msg)
         if frame_bgr is None:
             return
 

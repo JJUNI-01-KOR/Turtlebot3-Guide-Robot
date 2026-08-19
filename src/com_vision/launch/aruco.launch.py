@@ -31,6 +31,13 @@ def generate_launch_description():
                 'format': 'RGB888',
                 'width': 640,
                 'height': 480,
+                # 2026-08-19: 프레임 간격 하한/상한(us). aruco_node는 detection_rate
+                # =5Hz로만 소비하는데 기본 설정에서는 카메라가 약 17Hz로 뿜어서,
+                # 0.92MB짜리 원본 프레임을 초당 17번 직렬화/전송/역직렬화하느라
+                # CPU를 그냥 버렸다(실측 camera_node 17.7%, load 4.46).
+                # 약 10Hz로 제한하니 camera_node 9.6%, load 3.70으로 떨어졌다.
+                # 검출 주기(5Hz)보다는 여유가 있어야 하므로 더 낮추지는 말 것.
+                'FrameDurationLimits': [100000, 100000],
             }],
         ),
         Node(
