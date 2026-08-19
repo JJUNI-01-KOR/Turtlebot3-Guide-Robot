@@ -398,3 +398,19 @@ waypoint_follower:
       plugin: "nav2_waypoint_follower::WaitAtWaypoint"
       enabled: True
       waypoint_pause_duration: 200
+
+# 2026-08-18: pm2로 8개 노드를 한꺼번에 띄우면 라즈베리파이4 CPU가 순간적으로
+# 과부하 상태가 되고, lifecycle_manager의 bond heartbeat 기본 타임아웃(4초)
+# 안에 waypoint_follower/bt_navigator가 응답을 못 해 "CRITICAL FAILURE: SERVER
+# ... IS DOWN after not receiving a heartbeat for 4000 ms"로 판정 -> 전체
+# 셧다운 -> pm2가 launch 프로세스 종료를 감지해 navigation을 재시작 (몇 번
+# 반복되다 CPU 부하가 가라앉으면 그제서야 성공). 노드가 실제로 죽은 게 아니라
+# 시작 시점 CPU 경합 때문이므로, heartbeat 타임아웃을 넉넉하게 늘려서 초기
+# 부하 구간을 버티게 한다.
+lifecycle_manager_navigation:
+  ros__parameters:
+    bond_timeout: 10.0
+
+lifecycle_manager_localization:
+  ros__parameters:
+    bond_timeout: 10.0
