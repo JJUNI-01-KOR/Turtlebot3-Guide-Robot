@@ -2,15 +2,25 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>com_gui</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="com@todo.todo">com</maintainer>
-  <license>TODO: License declaration</license>
+  <version>2.0.0</version>
+  <description>
+    COM 방문자 안내 로봇 관제 대시보드 (PyQt5, 다크 테마).
+    SLAM 맵 뷰, 카메라 실시간 영상, 임무 제어, 로봇 상태, 센서 모니터,
+    배터리 추이, 알람/타임라인, 측정 로그 조회, 디버그용 수동 주행을 제공한다.
+    참조: HMI-001, ICD-001, SDD-001, SRS-001
+  </description>
+  <maintainer email="kom@example.com">KOM</maintainer>
+  <license>Apache-2.0</license>
 
-  <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
-  <test_depend>python3-pytest</test_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>com_interfaces</exec_depend>
+  <exec_depend>python3-pyqt5</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

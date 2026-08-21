@@ -2,10 +2,12 @@ from enum import Enum, auto
 
 
 class MissionState(Enum):
-    """SDD-001 3.1절 - 상태 머신 상태 정의"""
+    """SDD-001 3.1절 - 상태 머신 상태 정의."""
+
     SYSTEM_INIT = auto()
     LOCALIZING = auto()
     READY = auto()
+    UNDOCKING = auto()
     GUIDING = auto()
     OBSTACLE_STOP = auto()
     ARRIVED = auto()

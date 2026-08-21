@@ -1,0 +1,431 @@
+# com_navigation 전용 Nav2 파라미터 (2026-08-06)
+#
+# turtlebot3_navigation2/param/humble/burger.yaml(패키지 기본값)을 기반으로,
+# 라즈베리파이4 실물 하드웨어에서 com_vision(카메라+ArUco+HOG 사람감지)과 Nav2를
+# 동시에 돌릴 때 CPU 과부하(load average 6~7, 4코어 기준)로 /tf(map->odom)·/scan이
+# 간헐적으로 끊기는 문제를 완화하기 위해 부하가 큰 항목들을 낮춤. 실측(2026-08-06):
+# bt_navigator가 100Hz(10ms) tick을 시도하다 "Behavior Tree tick rate exceeded"
+# 경고가 반복됐고, controller_server도 "Control loop missed its desired rate of
+# 10Hz" 경고가 났음 - 둘 다 이 파일에서 완화 대상.
+#
+# 부가 수정: 기본값의 global_costmap/recoveries_server가 use_sim_time: true로
+# 남아있던 것을 False로 정정(다른 서버는 전부 False인데 이 둘만 true였음 - 실물
+# 하드웨어에서 TF 타임스탬프 불일치를 유발할 수 있는 실제 버그로 판단, 원인 확정은
+# 아니지만 오늘 관찰된 "extrapolation into the past" TF 에러와 정합됨).
+
+amcl:
+  ros__parameters:
+    use_sim_time: False
+    # 2026-08-11: 런타임에 /initialpose 토픽으로 위치를 주면 AMCL이 "Failed to
+    # transform initial pose in time"으로 계속 거부하는 문제를 실측(메시지 stamp를
+    # 0으로 보내도 동일 - AMCL이 메시지 stamp가 아니라 자기 now()로 조회하는 것으로
+    # 추정, /odom 20Hz 발행주기와 무관하게 항상 재현됨). 토픽 대신 AMCL 자체 시작
+    # 파라미터로 초기위치를 주면 이 레이스를 안 탄다는 것까지 실측 확인함(Setting
+    # pose 성공, /amcl_pose 정상 발행). 단, 이후 map->odom tf가 계속 갱신되는지는
+    # 별개 문제로 남아있음(README §12 "Nav2가 실제 이동 없이 목표 도달로 오판" 참고).
+    #
+    # 아래 좌표는 waypoints.yaml의 docking 웨이포인트(충전 스테이션 앞 정렬점) 기준 -
+    # URS-001 2.4절 사전조건("로봇의 초기 위치는 충전 스테이션 앞 정렬점")과 일치하는
+    # 정상 운영 시 기본값. **로봇을 다른 곳에 두고 기동하면 이 좌표부터 실제 위치로
+    # 갱신할 것** - 안 그러면 AMCL이 엉뚱한 위치를 확신한 채로 시작함.
+    set_initial_pose: true
+    # 2026-08-18: 기존 값(1.079, 0.901)은 지도상 벽에서 10cm 거리(robot_radius=0.1m)라
+    # 출발점이 lethal 셀로 잡혀 Nav2 planner가 경로 계산 자체를 거부했다
+    # (GridBased: failed to create plan -> 모든 목적지 status=6 ABORTED).
+    # waypoints.yaml의 docking 좌표(벽에서 1.0m 여유)로 맞춤.
+    # 2026-08-19: waypoints.yaml의 docking 좌표 재측정에 맞춰 갱신 (세 곳이 같은 값을
+    # 써야 한다: 여기, waypoints.yaml docking, auto_dock_params.yaml dock_approach_*).
+    initial_pose:
+      x: 0.5326756643036313
+      y: 0.03834829532494814
+      z: 0.0
+      yaw: 1.4981870525
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+    base_frame_id: "base_footprint"
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    global_frame_id: "map"
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 100.0
+    laser_min_range: -1.0
+    laser_model_type: "likelihood_field"
+    max_beams: 60
+    # 2000->1000: 파티클 수는 AMCL의 스캔당 CPU 비용에 거의 선형으로 영향.
+    # 실내 소규모 맵(com_navigation/maps/map.yaml) 기준 1000개로도 수렴 충분하다고 판단.
+    max_particles: 1000
+    min_particles: 500
+    odom_frame_id: "odom"
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    resample_interval: 1
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    save_pose_rate: 0.5
+    sigma_hit: 0.2
+    tf_broadcast: true
+    transform_tolerance: 1.0
+    update_min_a: 0.2
+    update_min_d: 0.25
+    z_hit: 0.5
+    z_max: 0.05
+    z_rand: 0.5
+    z_short: 0.05
+    scan_topic: scan
+
+amcl_map_client:
+  ros__parameters:
+    use_sim_time: False
+
+amcl_rclcpp_node:
+  ros__parameters:
+    use_sim_time: False
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: False
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odom
+    default_bt_xml_filename: "navigate_w_replanning_and_recovery.xml"
+    # 10ms(100Hz)->100ms(10Hz): 기본값이 Pi4에서 "tick rate exceeded" 경고를
+    # 반복적으로 냄 - 저속 실내 안내 로봇에 100Hz BT tick은 과함, 10Hz로 충분.
+    bt_loop_duration: 100
+    default_server_timeout: 20
+    # Groot(원격 BT 모니터링 GUI) 미사용 - ZMQ 퍼블리셔 오버헤드 제거
+    enable_groot_monitoring: False
+    groot_zmq_publisher_port: 1666
+    groot_zmq_server_port: 1667
+    plugin_lib_names:
+    - nav2_compute_path_to_pose_action_bt_node
+    - nav2_compute_path_through_poses_action_bt_node
+    - nav2_follow_path_action_bt_node
+    - nav2_back_up_action_bt_node
+    - nav2_spin_action_bt_node
+    - nav2_wait_action_bt_node
+    - nav2_clear_costmap_service_bt_node
+    - nav2_is_stuck_condition_bt_node
+    - nav2_goal_reached_condition_bt_node
+    - nav2_goal_updated_condition_bt_node
+    - nav2_initial_pose_received_condition_bt_node
+    - nav2_reinitialize_global_localization_service_bt_node
+    - nav2_rate_controller_bt_node
+    - nav2_distance_controller_bt_node
+    - nav2_speed_controller_bt_node
+    - nav2_truncate_path_action_bt_node
+    - nav2_goal_updater_node_bt_node
+    - nav2_recovery_node_bt_node
+    - nav2_pipeline_sequence_bt_node
+    - nav2_round_robin_node_bt_node
+    - nav2_transform_available_condition_bt_node
+    - nav2_time_expired_condition_bt_node
+    - nav2_distance_traveled_condition_bt_node
+    - nav2_single_trigger_bt_node
+    - nav2_is_battery_low_condition_bt_node
+    - nav2_navigate_through_poses_action_bt_node
+    - nav2_navigate_to_pose_action_bt_node
+    - nav2_remove_passed_goals_action_bt_node
+    - nav2_planner_selector_bt_node
+    - nav2_controller_selector_bt_node
+    - nav2_goal_checker_selector_bt_node
+
+bt_navigator_rclcpp_node:
+  ros__parameters:
+    use_sim_time: False
+
+controller_server:
+  ros__parameters:
+    use_sim_time: False
+    controller_frequency: 10.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+
+    # DWB parameters
+    # max_vel_x=0.22m/s로 저속 로봇이라 궤적 후보를 촘촘히 샘플링할 필요가 적음.
+    # vx_samples 20->10, vtheta_samples 40->20, sim_time 1.5->1.0 로 궤적 롤아웃
+    # 계산량을 대폭 줄임(제어주기당 후보 수 대략 4분의 1) - controller_server가
+    # "Control loop missed its desired rate of 10Hz" 경고를 내던 게 이 부분이 원인.
+    FollowPath:
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: True
+      min_vel_x: 0.0
+      min_vel_y: 0.0
+      max_vel_x: 0.22
+      max_vel_y: 0.0
+      max_vel_theta: 1.0
+      min_speed_xy: 0.0
+      max_speed_xy: 0.22
+      min_speed_theta: 0.0
+      acc_lim_x: 2.5
+      acc_lim_y: 0.0
+      acc_lim_theta: 3.2
+      decel_lim_x: -2.5
+      decel_lim_y: 0.0
+      decel_lim_theta: -3.2
+      vx_samples: 10
+      vy_samples: 0
+      vtheta_samples: 20
+      sim_time: 1.0
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.2
+      xy_goal_tolerance: 0.05
+      trans_stopped_velocity: 0.25
+      short_circuit_trajectory_evaluation: True
+      stateful: True
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      BaseObstacle.scale: 0.02
+      PathAlign.scale: 32.0
+      PathAlign.forward_point_distance: 0.1
+      GoalAlign.scale: 24.0
+      GoalAlign.forward_point_distance: 0.1
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+controller_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: False
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      # 5.0->3.0Hz: 로컬 코스트맵 갱신 주기 완화(저속 로봇이라 3Hz로도 충분히 반응 가능)
+      update_frequency: 3.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      use_sim_time: False
+      rolling_window: true
+      width: 3
+      height: 3
+      resolution: 0.05
+      robot_radius: 0.1
+      transform_tolerance: 1.0  # scan/TF 타이밍 경합으로 costmap 갱신이 밀리던 것 완화 (2026-08-14).
+      # 2026-08-19: 진짜 원인이 부팅 시 시계 점프였을 가능성이 크다
+      # (com_launch/scripts/run_node.sh 주석 참고). 시계 대기를 넣었으니
+      # 0.2~0.3으로 되돌려도 되는지 재확인할 것 - 1.0초는 0.22m/s에서
+      # 22cm 위치 오차를 허용한다.
+      plugins: ["voxel_layer", "inflation_layer"]
+      # 2026-08-19: obstacle_layer 제거 - voxel_layer와 같은 /scan을 이중
+      # 처리하고 있었다. 표준 TB3 local_costmap은 voxel_layer만 쓴다.
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 1.0
+        cost_scaling_factor: 3.0
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: True
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        max_obstacle_height: 2.0
+        mark_threshold: 0
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      static_layer:
+        map_subscribe_transient_local: True
+      always_send_full_costmap: True
+  local_costmap_client:
+    ros__parameters:
+      use_sim_time: False
+  local_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: False
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      # 기본값(패키지 제공 burger.yaml)은 여기만 True로 남아있었음(다른 서버는 전부
+      # False) - 실물 하드웨어인데 sim time을 쓰면 TF 타임스탬프가 안 맞을 수 있어
+      # False로 정정.
+      use_sim_time: False
+      robot_radius: 0.1
+      transform_tolerance: 1.0  # scan/TF 타이밍 경합으로 costmap 갱신이 밀리던 것 완화 (2026-08-14).
+      # 2026-08-19: 진짜 원인이 부팅 시 시계 점프였을 가능성이 크다
+      # (com_launch/scripts/run_node.sh 주석 참고). 시계 대기를 넣었으니
+      # 0.2~0.3으로 되돌려도 되는지 재확인할 것 - 1.0초는 0.22m/s에서
+      # 22cm 위치 오차를 허용한다.
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # 2026-08-19: voxel_layer 제거. obstacle_layer와 같은 /scan을 두 번
+      # 처리하고 있었고(표준 TB3는 global에 voxel_layer를 안 넣는다), 28x15m
+      # 전역 코스트맵에 3D 복셀을 돌리는 건 2D 라이다 버거에서 순수 낭비다.
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: True
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        max_obstacle_height: 2.0
+        mark_threshold: 0
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
+      always_send_full_costmap: True
+  global_costmap_client:
+    ros__parameters:
+      use_sim_time: False
+  global_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: False
+
+map_server:
+  ros__parameters:
+    use_sim_time: False
+    yaml_filename: "map.yaml"
+
+map_saver:
+  ros__parameters:
+    use_sim_time: False
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: True
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 20.0
+    use_sim_time: False
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false
+      allow_unknown: true
+
+planner_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: False
+
+recoveries_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    recovery_plugins: ["spin", "backup", "wait"]
+    spin:
+      plugin: "nav2_recoveries/Spin"
+    backup:
+      plugin: "nav2_recoveries/BackUp"
+    wait:
+      plugin: "nav2_recoveries/Wait"
+    global_frame: odom
+    robot_base_frame: base_link
+    transform_timeout: 0.1
+    # 기본값의 true는 global_costmap과 같은 종류의 잔재 버그로 판단 - False로 정정
+    use_sim_time: False
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+
+robot_state_publisher:
+  ros__parameters:
+    use_sim_time: False
+
+waypoint_follower:
+  ros__parameters:
+    loop_rate: 2000
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 200
+
+# 2026-08-18: pm2로 8개 노드를 한꺼번에 띄우면 라즈베리파이4 CPU가 순간적으로
+# 과부하 상태가 되고, lifecycle_manager의 bond heartbeat 기본 타임아웃(4초)
+# 안에 waypoint_follower/bt_navigator가 응답을 못 해 "CRITICAL FAILURE: SERVER
+# ... IS DOWN after not receiving a heartbeat for 4000 ms"로 판정 -> 전체
+# 셧다운 -> pm2가 launch 프로세스 종료를 감지해 navigation을 재시작 (몇 번
+# 반복되다 CPU 부하가 가라앉으면 그제서야 성공). 노드가 실제로 죽은 게 아니라
+# 시작 시점 CPU 경합 때문이므로, heartbeat 타임아웃을 넉넉하게 늘려서 초기
+# 부하 구간을 버티게 한다.
+lifecycle_manager_navigation:
+  ros__parameters:
+    bond_timeout: 10.0
+
+lifecycle_manager_localization:
+  ros__parameters:
+    bond_timeout: 10.0

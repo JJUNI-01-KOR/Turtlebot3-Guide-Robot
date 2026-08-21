@@ -1,0 +1,4 @@
+int32 marker_id
+geometry_msgs/PoseStamped pose
+float32 lateral_error
+float32 distance_error
