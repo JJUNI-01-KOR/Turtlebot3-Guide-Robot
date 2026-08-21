@@ -11,7 +11,7 @@ def generate_launch_description():
     # 오버라이드 가능한 launch argument로 뺀다(기본값은 그대로 유지).
     default_calibration_file = (
         '/home/com/.ros/camera_info/'
-        'imx219__base_soc_i2c0mux_i2c_1_imx219_10_640x480.yaml'
+        'imx219__base_soc_i2c0mux_i2c_1_imx219_10_320x240.yaml'
     )
 
     return LaunchDescription([
@@ -29,8 +29,8 @@ def generate_launch_description():
                 # aruco_node의 imgmsg_to_cv2(desired_encoding='bgr8')가 매 프레임 실패함.
                 # RGB888로 고정해야 aruco_node가 실제로 프레임을 받는다.
                 'format': 'RGB888',
-                'width': 640,
-                'height': 480,
+                'width': 320,
+                'height': 240,
                 # 2026-08-19: 프레임 간격 하한/상한(us). aruco_node는 detection_rate
                 # =5Hz로만 소비하는데 기본 설정에서는 카메라가 약 17Hz로 뿜어서,
                 # 0.92MB짜리 원본 프레임을 초당 17번 직렬화/전송/역직렬화하느라

@@ -73,9 +73,9 @@ const Destination DESTINATIONS[] = {
   {"class3", {G_GANG, G_UI, G_SIL}, '3'},
   {"class4", {G_GANG, G_UI, G_SIL}, '4'},
   {"class5", {G_GANG, G_UI, G_SIL}, '5'},
-  {"info", {G_HOE, G_UI, G_SIL}, 0},
-  {"office", {G_IN, G_PO, G_NONE}, 0},
-  {"meeting", {G_SANG, G_DAM, G_SIL}, 0},
+  {"meeting", {G_HOE, G_UI, G_SIL}, 0},
+  {"info", {G_IN, G_PO, G_NONE}, 0},
+  {"office", {G_SANG, G_DAM, G_SIL}, 0},
 };
 const int NUM_DEST = sizeof(DESTINATIONS) / sizeof(DESTINATIONS[0]);
 
@@ -432,7 +432,7 @@ void renderEye(int cx, int cy, int outSign, int lx, int ly,
     }
 
     // ---- 3. 눈알 하단 눈꺼풀 라인 ----
-    if (y >= SCL_BOT - 5) { span(vL, vR, sy, LOWLID); continue; }
+    if (y >= SCL_BOT - 5) { span(vL, vR, sy, LOWLID); }
 
     // ---- 4. 아랫눈꺼풀 (가운데를 아래에서 덮어 ^^ 모양을 만듦) ----
     int lo0 = 1, lo1 = 0;                        // 비어있음

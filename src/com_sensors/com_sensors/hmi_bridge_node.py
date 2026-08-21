@@ -65,7 +65,7 @@ BATTERY_SEND_DEADBAND = 3
 JOY_X_LOW_THRESHOLD = 300
 JOY_X_HIGH_THRESHOLD = 700
 JOY_MOVE_DEBOUNCE_S = 0.25
-JOY_CONFIRM_DEBOUNCE_S = 0.3
+JOY_CONFIRM_DEBOUNCE_S = 0.1
 
 # /proc/net/wireless의 link quality는 드라이버별로 상한이 다르나
 # 라즈베리파이 내장 wifi(brcmfmac 등)는 보통 0~70 범위를 사용한다.
@@ -75,6 +75,7 @@ WIFI_LINK_QUALITY_MAX = 70
 class HmiBridgeNode(Node):
     def __init__(self):
         super().__init__('com_hmi_bridge_node')
+        # self.create_timer(3.0, lambda: self.call_start_mission('class4'))
 
         # 2026-08-11: udev 규칙(99-com-robot-serial.rules)으로 시리얼 번호 기반 고정
         # 심볼릭 링크를 만들어서 ttyACM 번호가 재부팅/재연결 때마다 바뀌는 문제를
@@ -185,6 +186,7 @@ class HmiBridgeNode(Node):
             return
 
         if line.startswith('SELECT:'):
+            self.get_logger().info(f"Received {line} from Arduino")
             destination_id = line.split(':', 1)[1]
             self.call_start_mission(destination_id)
 
@@ -222,12 +224,14 @@ class HmiBridgeNode(Node):
             now = time.monotonic()
             if now - self.last_confirm_time > JOY_CONFIRM_DEBOUNCE_S:
                 self.last_confirm_time = now
-                self._write(b'CONFIRM\n')
-        self.last_joy_button = pressed
+                self._write(b"CONFIRM\n")
 
     def on_joystick_move_timer(self):
         now = time.monotonic()
         if now - self.last_move_time < JOY_MOVE_DEBOUNCE_S:
+            return
+        if now - self.last_confirm_time < 1.0:
+            return
             return
         # 2026-08-04: 화면을 180도 반전(setRotation 1->3)하면서 조이스틱 방향도
         # 반대로 맞춤 - x가 작을 때 DOWN, 클 때 UP.

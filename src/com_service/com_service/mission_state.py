@@ -7,6 +7,7 @@ class MissionState(Enum):
     SYSTEM_INIT = auto()
     LOCALIZING = auto()
     READY = auto()
+    UNDOCKING = auto()
     GUIDING = auto()
     OBSTACLE_STOP = auto()
     ARRIVED = auto()

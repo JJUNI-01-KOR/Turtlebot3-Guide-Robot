@@ -196,12 +196,13 @@ class DockingController:
         self.dock_turn_tolerance = node.get_parameter('dock_turn_tolerance').value
         self.dock_settle_time = node.get_parameter('dock_settle_time').value
         self.dock_stale_margin = node.get_parameter('dock_stale_margin').value
+        self.align_blind_stop = node.get_parameter('dock_align_blind_stop').value
         self.k_yaw = node.get_parameter('dock_k_yaw').value
         self.use_yaw_term = node.get_parameter('dock_use_yaw_term').value
 
         self.dock_target_distance = node.get_parameter('dock_target_distance').value
-        self.lateral_tolerance = 0.02
-        self.distance_tolerance = 0.03
+        self.lateral_tolerance = 0.05
+        self.distance_tolerance = 0.05
 
         self.attempt_count = 0
         self.search_count = 0
@@ -215,6 +216,12 @@ class DockingController:
         self.turn_accum = 0.0
         self.turn_prev_yaw = None
         self.turn_goal = self.dock_turn_left_angle
+        self.turn_dir = 1.0
+        # '탐색 기준 방위'에서 현재 얼마나 틀어져 있는지(rad, +가 좌).
+        # 기준 방위는 마커를 마지막으로 본 자세(없으면 최초 회전을 마친 자세)이고,
+        # 좌우 대칭 재탐색이 그 자세로 정확히 돌아올 수 있게 하려고 들고 있는다.
+        self.search_offset = 0.0
+        self.reset_offset_on_settle = False
         self.stop_time = None
 
     # ── 시작/정지 ──
@@ -222,8 +229,11 @@ class DockingController:
         self.active = True
         self.attempt_count = 0
         self.search_count = 0
+        self.search_offset = 0.0
+        # 최초 회전은 '탐색 기준 방위'를 잡는 동작이므로 오프셋에 누적하지 않는다.
+        self.reset_offset_on_settle = True
         self.last_marker_stamp = self.node.get_clock().now()
-        self._begin_turn_left()
+        self._begin_turn(self.dock_turn_left_angle)
         self.node.get_logger().info(
             'DockingController 시작: 좌 %.0f도 회전 후 마커 확인'
             % (self.dock_turn_left_angle * 180.0 / math.pi)
@@ -233,12 +243,17 @@ class DockingController:
         self.active = False
         self.node.publish_cmd_vel(0.0, 0.0)
 
-    def _begin_turn_left(self, angle=None):
-        """좌회전 시작. angle 을 주면 그만큼만 돈다(미세 스캔용)."""
+    def _begin_turn(self, angle):
+        """제자리 회전 시작. angle 부호가 방향(+좌/-우), 크기가 돌 각도.
+
+        2026-08-20: 예전엔 좌회전 전용이라 재탐색이 한 방향으로만 누적됐다.
+        마커를 오른쪽으로 놓치면 영원히 못 찾는 구조였다.
+        """
         self.phase = self.PHASE_TURN_LEFT
         self.turn_accum = 0.0
         self.turn_prev_yaw = self.node.odom_yaw
-        self.turn_goal = self.dock_turn_left_angle if angle is None else angle
+        self.turn_dir = 1.0 if angle >= 0.0 else -1.0
+        self.turn_goal = abs(angle)
         self.stop_time = None
 
     def _enter_settle(self):
@@ -246,11 +261,20 @@ class DockingController:
         self.node.publish_cmd_vel(0.0, 0.0)
         # 정지 시각을 기록해두고, 이보다 먼저 촬영된 마커 프레임은 전부 버린다.
         self.stop_time = self.node.get_clock().now()
+        # 실제로 돈 만큼만 기준 방위 오프셋에 반영한다(허용오차로 조기 종료되는
+        # 경우가 많아 목표각을 그대로 더하면 실제 자세와 어긋난다).
+        self.search_offset += self.turn_dir * self.turn_accum
         self.node.get_logger().info(
-            '좌회전 완료 (목표 %.1f도 / 실제 %.1f도) - 정지 후 마커 확인 대기'
-            % (self.turn_goal * 180.0 / math.pi,
-               self.turn_accum * 180.0 / math.pi)
+            '%s회전 완료 (목표 %.1f도 / 실제 %.1f도, 기준대비 %+.1f도)'
+            ' - 정지 후 마커 확인 대기'
+            % ('좌' if self.turn_dir > 0 else '우',
+               self.turn_goal * 180.0 / math.pi,
+               self.turn_accum * 180.0 / math.pi,
+               self.search_offset * 180.0 / math.pi)
         )
+        if self.reset_offset_on_settle:
+            self.search_offset = 0.0
+            self.reset_offset_on_settle = False
 
     # ── 주기 처리 (docking_timer, 20Hz) ──
     def update(self):
@@ -261,6 +285,17 @@ class DockingController:
         elif self.phase == self.PHASE_SETTLE:
             # 정지 유지. 마커는 on_aruco_marker 콜백이 받아서 ALIGN으로 넘긴다.
             self.node.publish_cmd_vel(0.0, 0.0)
+        elif self.phase == self.PHASE_ALIGN:
+            # 2026-08-20 추가. ALIGN 중 /cmd_vel은 on_aruco_marker 콜백 안에서만
+            # 나가기 때문에, 마커를 놓치면 새 명령이 아예 안 나가고 로봇은 '마지막
+            # 속도'를 그대로 유지한 채 계속 굴러갔다. check_marker_timeout이 뜨는
+            # 5초 동안 눈감고 주행하는 셈이라, 그 사이 각속도가 붙어 있었으면
+            # 최대 80도 이상 틀어져 재탐색으로도 못 돌아왔다.
+            # 마커가 잠깐이라도 끊기면 즉시 정지시킨다(재탐색 판단은 그대로 5초).
+            since = (self.node.get_clock().now()
+                     - self.last_marker_stamp).nanoseconds / 1e9
+            if since > self.align_blind_stop:
+                self.node.publish_cmd_vel(0.0, 0.0)
 
     def _update_turn_left(self):
         yaw = self.node.odom_yaw
@@ -288,7 +323,8 @@ class DockingController:
         speed = self.dock_turn_speed
         if remaining < 0.35:      # 약 20도
             speed = max(0.12, self.dock_turn_speed * remaining / 0.35)
-        self.node.publish_cmd_vel(0.0, speed)   # +값 = 좌회전(CCW)
+        # +값 = 좌회전(CCW), turn_dir 로 좌/우를 고른다
+        self.node.publish_cmd_vel(0.0, speed * self.turn_dir)
 
     # ── 마커 콜백 ──
     def on_aruco_marker(self, msg: ArucoMarker):
@@ -317,6 +353,10 @@ class DockingController:
 
         self.last_marker_stamp = self.node.get_clock().now()
         self.search_count = 0
+        # 마커가 보이는 지금 자세가 새 '탐색 기준 방위'다. ALIGN 중에는 조향 때문에
+        # 자세가 계속 바뀌는데 그건 search_offset에 반영되지 않으므로, 여기서
+        # 0으로 되돌려야 나중에 재탐색이 엉뚱한 방위를 기준으로 훑지 않는다.
+        self.search_offset = 0.0
 
         if self.phase == self.PHASE_SETTLE:
             self.phase = self.PHASE_ALIGN
@@ -382,6 +422,13 @@ class DockingController:
         2026-08-18: 예전의 '15도씩 회전 재탐색'을 제거했다. 회전하면서 찾는
         방식이 바로 카메라 지연 때문에 마커를 지나치는 원인이었다. 대신
         제자리에서 다시 좌 90도 회전을 시도한다(오도메트리 오차 누적 대비).
+
+        2026-08-20: 미세 스캔을 좌우 대칭으로 바꿨다. 예전엔 좌로만 7도씩
+        누적돼서(+7, +14, +21 ...) 마커를 오른쪽으로 놓치면 절대 못 찾았고,
+        게다가 dock_turn_left_angle=0 이라 재시도 각도가 max(0, 0-21)=0 으로
+        계산돼 시도 단계에서는 사실상 아무것도 안 하고 5초를 버렸다.
+        이제 기준 방위(ALIGN 시작 자세)에서 +7, -7, +14, -14 ... 로 훑고,
+        스캔을 다 쓰면 기준 방위로 되돌아온 뒤 다음 시도를 시작한다.
         """
         if not self.active or self.last_marker_stamp is None:
             return
@@ -400,12 +447,22 @@ class DockingController:
             # 마커가 화각 밖에 있으면 영원히 못 찾았다. 이제 dock_nudge_angle
             # 만큼만 더 돌고 다시 멈춰서 본다("돌고-멈추고-보고" 반복).
             # 회전 중에는 절대 판정하지 않으므로 카메라 지연 문제는 생기지 않는다.
+            #
+            # n번째 스캔의 목표 오프셋: 홀수면 좌(+), 짝수면 우(-),
+            # 크기는 ceil(n/2) * nudge -> +7, -7, +14, -14, +21 ...
+            n = self.search_count
+            sign = 1.0 if n % 2 else -1.0
+            target_offset = sign * ((n + 1) // 2) * self.dock_nudge_angle
+            turn = target_offset - self.search_offset
             self.node.get_logger().warn(
-                'ArUco 마커 미검출 %.1fs -> 좌로 %.0f도 더 돌고 재확인 (%d/%d)'
-                % (elapsed, self.dock_nudge_angle * 180.0 / math.pi,
+                'ArUco 마커 미검출 %.1fs -> %s로 %.0f도 돌려 기준대비 %+.0f도에서'
+                ' 재확인 (%d/%d)'
+                % (elapsed, '좌' if turn >= 0 else '우',
+                   abs(turn) * 180.0 / math.pi,
+                   target_offset * 180.0 / math.pi,
                    self.search_count, self.aruco_search_max)
             )
-            self._begin_turn_left(self.dock_nudge_angle)
+            self._begin_turn(turn)
             return
 
         self.search_count = 0
@@ -417,18 +474,20 @@ class DockingController:
             self.node.state_machine.transition(MissionState.ERROR)
             return
 
-        # 미세 스캔을 다 소진했다는 건 방향 자체가 틀렸다는 뜻이므로, 여기서만
-        # 처음부터(dock_turn_left_angle) 다시 돈다. 미세 스캔으로 이미 돌아간
-        # 각도만큼은 빼서, 매 시도마다 180도로 누적되지 않게 한다.
-        already = self.dock_nudge_angle * self.aruco_search_max
-        retry_angle = max(0.0, self.dock_turn_left_angle - already)
+        # 미세 스캔을 다 소진했으면 일단 기준 방위로 되돌아온다. 좌우 대칭 스캔은
+        # 마지막에 한쪽으로 치우친 자세로 끝나기 때문에, 그대로 다음 시도를
+        # 시작하면 스캔 범위가 계속 한쪽으로 밀린다.
+        retry_turn = -self.search_offset
         self.node.get_logger().warn(
-            'ArUco 마커 재확인 %d회 실패 -> 좌로 %.0f도 더 회전 후 재시도 (%d/%d)'
-            % (self.aruco_search_max, retry_angle * 180.0 / math.pi,
+            'ArUco 마커 재확인 %d회 실패 -> 기준 방위로 %s %.0f도 복귀 후 재시도'
+            ' (%d/%d)'
+            % (self.aruco_search_max,
+               '좌' if retry_turn >= 0 else '우',
+               abs(retry_turn) * 180.0 / math.pi,
                self.attempt_count, self.docking_max_attempts)
         )
         self.node.publish_cmd_vel(0.0, 0.0)
-        self._begin_turn_left(retry_angle)
+        self._begin_turn(retry_turn)
 
 
 class SafetyMonitor:
@@ -909,7 +968,15 @@ class ServiceManagerNode(Node):
         self.declare_parameter('dock_marker_id', 29)
         # 2026-08-19: 도킹 마커 앞에서 최종적으로 멈출 거리(m).
         # DockingController._range_error 주석 참고. 0으로 두면 도크에 충돌한다.
-        self.declare_parameter('dock_target_distance', 0.25)
+        # 2026-08-20 실측: 이 카메라는 화각이 매우 좁다(imx219 640x480 모드가 센서
+        # 중앙 크롭이라 fx=fy≈668 @320x240 -> 수평 27도/수직 20도). 10cm 마커의
+        # 화면상 높이는 668*0.1/거리 픽셀이므로
+        #     0.28m -> 240px (240px 화면을 꽉 채움, 검출 한계)
+        #     0.35m -> 191px (화면의 80%, 조금만 틀어져도 잘림)
+        #     0.45m -> 149px (62%, 여유 있음)
+        # 즉 0.35m는 '정렬 성공 판정 구간(0.30~0.40m)' 전체가 검출 한계에 걸쳐
+        # 있어서 도착 신호가 뜰 수 없었다. 0.45m로 물러난다.
+        self.declare_parameter('dock_target_distance', 0.45)
         # 2026-08-18: 360도 탐색 -> 좌 90도 고정 회전으로 변경하며 추가된 값들
         # 2026-08-18 실측: 정확히 90도(1.5708)로 돌면 마커가 화각 경계에 걸려
         # 인식이 안 됐다. 5도 더 돌리면 화각 안으로 확실히 들어온다.
@@ -928,7 +995,15 @@ class ServiceManagerNode(Node):
         # 정지 시각 + 이 여유 이후에 '촬영된' 프레임만 신뢰한다. 카메라 파이프라인
         # 지연(Pi4에서 수백 ms)만큼 잡아줘야 회전 중 찍힌 낡은 값에 안 속는다.
         self.declare_parameter('dock_stale_margin', 0.3)         # s
-        self.declare_parameter('dock_k_yaw', 0.5)                # 반대로 돌면 -0.5
+        # ALIGN 중 마커가 이 시간 이상 안 보이면 즉시 정지(눈감고 주행 방지).
+        # 마커는 5Hz(0.2s)로 오므로 0.5s면 연속 2프레임 유실에 해당한다.
+        self.declare_parameter('dock_align_blind_stop', 0.5)     # s
+        # 2026-08-20 실측으로 부호 확정: +0.5 였을 때 lateral 항과 정확히 상쇄되는
+        # 평형점에 갇혔다. 접근 13초 내내 좌우오차가 +0.055m에 고정된 채 각속도만
+        # 0 근처였고(0.8*0.055 = 0.044 = -0.5*(-0.088), 실측 yaw 평균 -5.3도가
+        # 이론 상쇄점 -5.05도와 일치), 그 5.5cm 옆으로 평행 접근하다가 거리가
+        # 줄면서 마커가 화각 밖으로 밀려나 0.48m에서 검출이 끊겼다.
+        self.declare_parameter('dock_k_yaw', -0.5)
         self.declare_parameter('dock_use_yaw_term', True)
         self.declare_parameter('docking_waypoint_id', 'docking')
         self.declare_parameter('startup_ready_delay', 3.0)
@@ -1069,6 +1144,22 @@ class ServiceManagerNode(Node):
         self.waypoint_sequencer.build_trajectory_2()
         self.send_next_waypoint()
 
+
+    def _undocking_loop(self):
+        if self.state_machine.state != MissionState.UNDOCKING:
+            self.undocking_timer.cancel()
+            return
+        
+        self.undocking_count += 1
+        # 1.5 seconds at 0.1s rate -> 15 ticks
+        if self.undocking_count >= 15:
+            self.undocking_timer.cancel()
+            self.publish_cmd_vel(0.0, 0.0)
+            self.state_machine.transition(MissionState.GUIDING)
+            self.send_next_waypoint()
+        else:
+            self.publish_cmd_vel(-0.15, 0.0)
+
     def on_start_mission(self, request, response):
         dest = request.destination_id
         if not self.waypoint_sequencer.is_valid_destination(dest):
@@ -1112,11 +1203,11 @@ class ServiceManagerNode(Node):
         self.waypoint_sequencer.build_trajectory_1(dest)
         self.safety_monitor.reset_obstacle_retries()
         self.safety_monitor.reset_person_retries()
-        self.state_machine.transition(MissionState.GUIDING)
+        self.state_machine.transition(MissionState.UNDOCKING)
         self.publish_tts('guiding_start')
-        self.get_logger().info(f'start_mission requested: destination={dest}')
-
-        self.send_next_waypoint()
+        self.get_logger().info(f'start_mission requested: destination={dest} (undocking first)')
+        self.undocking_count = 0
+        self.undocking_timer = self.create_timer(0.1, self._undocking_loop)
 
         response.success = True
         response.message = '안내를 시작합니다'

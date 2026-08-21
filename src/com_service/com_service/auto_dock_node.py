@@ -675,7 +675,7 @@ class AutoDockNode(Node):
                 self.get_logger().info(
                     f'근접 중 인식 끊김 — 도착 간주 '
                     f'(마지막 {self.last_seen_distance:.3f} m)')
-                self._enter_state(State.TURN_180)
+                self._enter_state(State.ANNOUNCE)
             else:
                 self.get_logger().warn('접근 중 마커 놓침 — 재확인')
                 self._enter_state(State.FIND_MARKER)
@@ -686,8 +686,8 @@ class AutoDockNode(Node):
             self.get_logger().info(
                 f'최소거리 도달 ({distance:.3f} m, 좌우 '
                 f'{self.marker.lateral_error:+.3f} m, '
-                f'각도 {self.marker_yaw / DEG:+.1f}도) -> 180도 회전')
-            self._enter_state(State.TURN_180)
+                f'각도 {self.marker_yaw / DEG:+.1f}도) -> 도킹 완료(음성 안내)')
+            self._enter_state(State.ANNOUNCE)
             return
  
         # 가까울수록 각속도 제한. 코앞에서 홱 돌면 마커가 화각 밖으로 튄다.
