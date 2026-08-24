@@ -35,6 +35,16 @@
 
 ---
 
+## 🎬 데모 영상
+
+시연 전체 과정(자율주행 안내 → 목적지 도착 → 자동 복귀 → ArUco 정밀 도킹, 약 2분)을
+영상으로 담았습니다.
+
+▶️ **[전체 데모 영상 보기](docs/Demo_Video/Play_Demo.mp4)** — GitHub에서 파일을 클릭하면
+내장 플레이어로 바로 재생됩니다.
+
+---
+
 ## 주요 기능
 
 - **Nav2 자율주행 안내** — 지정 목적지 8곳(강의실1~5·회의실·인포·상담실)까지 경로 계획·주행
@@ -233,6 +243,9 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 
 제출용 정식 문서는 `docs/requirements/`에 있습니다 (URS·SRS·SAD·SDD·DDS·HMI·ICD 7종).
 발표 자료는 `docs/presentation/COM_TurtleBot3_발표자료.pptx`입니다.
+
+- 일정/역할: `docs/schedule/TurtleBot3_간트차트_일일역할.xlsx` (일일 역할 분담 간트차트)
+- 데모 영상: `docs/Demo_Video/Play_Demo.mp4`
 
 - 저장소: `unitydt-ros2-class2-2026/com_main_project_01`
 - 팀: COM (김찬중, 권오민) · 로봇 실물: `192.168.210.15` (`ROS_DOMAIN_ID=30`)
