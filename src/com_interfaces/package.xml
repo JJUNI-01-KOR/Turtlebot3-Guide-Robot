@@ -3,7 +3,7 @@
 <package format="3">
   <name>com_interfaces</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>COM 안내 로봇의 커스텀 msg/srv 정의 (StartMission, RobotState, ArucoMarker, EnvData, TtsRequest 등)</description>
   <maintainer email="rlackswnd09@gmail.com">com</maintainer>
   <license>TODO: License declaration</license>
 

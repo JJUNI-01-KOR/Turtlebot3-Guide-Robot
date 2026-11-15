@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='com',
     maintainer_email='com@todo.todo',
-    description='TODO: Package description',
+    description='웨이포인트·ArUco 마커 설정과 SLAM 지도',
     license='TODO: License declaration',
     extras_require={
         'test': [

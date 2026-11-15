@@ -3,7 +3,7 @@
 <package format="3">
   <name>com_service</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>임무 상태머신과 ArUco 정밀 도킹(service_manager), 음성 안내(voice), 자동 도킹(auto_dock) 노드</description>
   <maintainer email="com@todo.todo">com</maintainer>
   <license>TODO: License declaration</license>
 

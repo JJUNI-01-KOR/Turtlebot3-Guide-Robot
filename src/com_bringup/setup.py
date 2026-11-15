@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='com',
     maintainer_email='com@todo.todo',
-    description='TODO: Package description',
+    description='Nav2 기동 launch와 Raspberry Pi 4에 맞춘 nav2_params.yaml',
     license='TODO: License declaration',
     extras_require={
         'test': [

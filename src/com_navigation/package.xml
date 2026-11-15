@@ -3,7 +3,7 @@
 <package format="3">
   <name>com_navigation</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>웨이포인트·ArUco 마커 설정과 SLAM 지도</description>
   <maintainer email="com@todo.todo">com</maintainer>
   <license>TODO: License declaration</license>
 

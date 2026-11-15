@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='com',
     maintainer_email='com@todo.todo',
-    description='TODO: Package description',
+    description='아두이노 보드 시리얼 브릿지: 메인센서보드(serial_bridge), TFT보드(hmi_bridge)',
     license='TODO: License declaration',
     extras_require={
         'test': [

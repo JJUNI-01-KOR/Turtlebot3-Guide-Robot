@@ -3,7 +3,7 @@
 <package format="3">
   <name>com_bringup</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Nav2 기동 launch와 Raspberry Pi 4에 맞춘 nav2_params.yaml</description>
   <maintainer email="com@todo.todo">com</maintainer>
   <license>TODO: License declaration</license>
 

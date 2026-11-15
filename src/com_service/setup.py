@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='com',
     maintainer_email='com@todo.todo',
-    description='TODO: Package description',
+    description='임무 상태머신과 ArUco 정밀 도킹(service_manager), 음성 안내(voice), 자동 도킹(auto_dock) 노드',
     license='TODO: License declaration',
     extras_require={
         'test': [
