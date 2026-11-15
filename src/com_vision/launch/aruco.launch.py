@@ -1,3 +1,5 @@
+import os
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -9,9 +11,9 @@ def generate_launch_description():
     # 다른 계정에서 실행하면 aruco_node가 캘리브레이션을 못 읽고 조용히
     # 깨진다. robot_all.launch.py의 sensor_serial_port 등과 동일하게
     # 오버라이드 가능한 launch argument로 뺀다(기본값은 그대로 유지).
-    default_calibration_file = (
-        '/home/com/.ros/camera_info/'
-        'imx219__base_soc_i2c0mux_i2c_1_imx219_10_320x240.yaml'
+    default_calibration_file = os.path.join(
+        os.path.expanduser('~'), '.ros', 'camera_info',
+        'imx219__base_soc_i2c0mux_i2c_1_imx219_10_320x240.yaml',
     )
 
     return LaunchDescription([

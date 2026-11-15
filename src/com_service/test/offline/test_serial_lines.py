@@ -1,7 +1,10 @@
 """serial_bridge_node 의 라인 버퍼링 검증 (실제 시리얼/rclpy 없이)."""
 import sys, types
-sys.path.insert(0, '/home/com/com_ws/src/com_sensors')
-sys.path.insert(0, '/home/com/com_ws/src/com_sensors/com_sensors')
+import os
+# 저장소의 src/ 폴더 (이 파일 기준 상대 경로라 어느 PC에서든 실행된다)
+SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+sys.path.insert(0, os.path.join(SRC, 'com_sensors'))
+sys.path.insert(0, os.path.join(SRC, 'com_sensors', 'com_sensors'))
 for n in ['rclpy','rclpy.node','rclpy.qos','std_msgs','std_msgs.msg','serial']:
     m = types.ModuleType(n)
     m.__getattr__ = lambda a: type(a, (), {'__init__': lambda s,*x,**k: None})

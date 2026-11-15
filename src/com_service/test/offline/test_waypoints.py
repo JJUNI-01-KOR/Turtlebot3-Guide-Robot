@@ -1,7 +1,10 @@
 """실제 waypoints.yaml로 WaypointSequencer 로드/경로생성 검증."""
 import sys, types
-sys.path.insert(0, '/home/com/com_ws/src/com_service')
-sys.path.insert(0, '/home/com/com_ws/src/com_service/com_service')
+import os
+# 저장소의 src/ 폴더 (이 파일 기준 상대 경로라 어느 PC에서든 실행된다)
+SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+sys.path.insert(0, os.path.join(SRC, 'com_service'))
+sys.path.insert(0, os.path.join(SRC, 'com_service', 'com_service'))
 for n in ['rclpy', 'rclpy.node', 'rclpy.action', 'rclpy.qos', 'rclpy.duration', 'rclpy.time',
           'std_msgs', 'std_msgs.msg', 'std_srvs', 'std_srvs.srv', 'sensor_msgs',
           'sensor_msgs.msg', 'geometry_msgs', 'geometry_msgs.msg', 'com_interfaces',
@@ -26,7 +29,7 @@ def check(label, cond, detail=''):
     if not cond: fails.append(label)
 
 ws = smn.WaypointSequencer(N())
-ok = ws.load_waypoints('/home/com/com_ws/src/com_navigation/config/waypoints.yaml')
+ok = ws.load_waypoints(os.path.join(SRC, 'com_navigation', 'config', 'waypoints.yaml'))
 check('로드 성공', ok)
 check('웨이포인트 20개', len(ws.waypoints) == 20, str(len(ws.waypoints)))
 DEST_IDS = ['class1', 'class2', 'class3', 'class4', 'class5',
@@ -56,8 +59,8 @@ _dy = ws.waypoints['docking']['yaw']
 check('docking yaw 가 재측정값(1.4982 rad, 85.8도)', abs(_dy - 1.4981870525) < 1e-6,
       f'{_dy:.6f} rad = {_mm.degrees(_dy):.2f}도')
 import yaml as _y
-_n = _y.safe_load(open('/home/com/com_ws/src/com_navigation/config/nav2_params.yaml'))['amcl']['ros__parameters']['initial_pose']
-_a = _y.safe_load(open('/home/com/com_ws/src/com_service/config/auto_dock_params.yaml'))['com_auto_dock_node']['ros__parameters']
+_n = _y.safe_load(open(os.path.join(SRC, 'com_navigation', 'config', 'nav2_params.yaml')))['amcl']['ros__parameters']['initial_pose']
+_a = _y.safe_load(open(os.path.join(SRC, 'com_service', 'config', 'auto_dock_params.yaml')))['com_auto_dock_node']['ros__parameters']
 _d = ws.waypoints['docking']
 check('도킹 좌표가 세 파일에서 일치',
       abs(_n['x'] - _d['x']) < 1e-9 and abs(_n['y'] - _d['y']) < 1e-9

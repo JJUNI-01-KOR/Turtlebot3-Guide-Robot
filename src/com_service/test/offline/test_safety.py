@@ -2,8 +2,11 @@
 가짜 노드로 검증한다 (rclpy 실행 없이)."""
 import sys, types
 
-sys.path.insert(0, '/home/com/com_ws/src/com_service')
-sys.path.insert(0, '/home/com/com_ws/src/com_service/com_service')
+import os
+# 저장소의 src/ 폴더 (이 파일 기준 상대 경로라 어느 PC에서든 실행된다)
+SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+sys.path.insert(0, os.path.join(SRC, 'com_service'))
+sys.path.insert(0, os.path.join(SRC, 'com_service', 'com_service'))
 
 # rclpy/메시지 의존성을 최소한으로 스텁 처리
 for name in ['rclpy', 'rclpy.node', 'rclpy.action', 'rclpy.qos', 'rclpy.duration', 'rclpy.time', 'std_msgs',
