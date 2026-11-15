@@ -106,16 +106,16 @@ PM2_ALL_VALUE = 'all'
 
 # GUI는 개발 PC에서 뜨고, pm2는 로봇(라즈베리파이4)에서 돈다 — 그래서
 # 로컬 pm2를 부르면 안 되고, 반드시 SSH로 라즈베리파이에 접속해서 그쪽
-# pm2에 명령을 보내야 한다. 아래 두 값을 실제 라즈베리파이 접속 정보로
-# 맞춰뒀다.
+# pm2에 명령을 보내야 한다. 접속 정보는 환경변수 COM_ROBOT_SSH_USER /
+# COM_ROBOT_SSH_HOST 로 바꾼다 (없으면 아래 기본값).
 #
 # 필수 전제: 이 SSH는 GUI(QProcess)가 비밀번호 프롬프트에 응답할 수
 # 없으므로 반드시 "키 기반 무비밀번호 로그인"이 설정돼 있어야 한다.
 #   dev PC에서 (키가 없다면) ssh-keygen -t ed25519
-#   dev PC에서              ssh-copy-id com@192.168.210.15
-#   확인:                   ssh com@192.168.210.15 'pm2 list'  ← 비번 안 물어봐야 함
-PM2_SSH_USER = 'com'
-PM2_SSH_HOST = '192.168.210.15'
+#   dev PC에서              ssh-copy-id <계정>@<로봇 주소>
+#   확인:                   ssh <계정>@<로봇 주소> 'pm2 list'  ← 비번 안 물어봐야 함
+PM2_SSH_USER = os.environ.get('COM_ROBOT_SSH_USER', 'com')
+PM2_SSH_HOST = os.environ.get('COM_ROBOT_SSH_HOST', '192.168.210.15')
 # -o BatchMode=yes: 키 인증 실패 시 비밀번호를 물어보며 멈추는 대신 즉시 실패시킴
 # -o ConnectTimeout=5: 라즈베리파이가 꺼져있거나 네트워크가 끊겼을 때 5초 안에 실패
 PM2_RUN_PREFIX = [

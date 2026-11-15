@@ -14,34 +14,27 @@
 
 ---
 
-## 🎉 시연 결과
+## 시연 결과
 
-**2026-08-21 졸업 프로젝트 시연에서 전체 임무 사이클이 실물로 완주됐습니다.**
+2026-08-21 시연에서 실물 로봇으로 임무 한 사이클을 사람 개입 없이 마쳤습니다.
 
-- **자율주행 안내 → 목적지 도착 → 자동 복귀 → ArUco 마커(ID 29) 정밀 도킹**까지
-  전 구간이 사람 개입 없이 한 번에 수행됐습니다.
+- 자율주행 안내 → 목적지 도착 → 자동 복귀 → ArUco 마커(ID 29) 도킹
   (`READY → UNDOCKING → GUIDING → ARRIVED → RETURNING → DOCKING → DOCKED → READY`)
-- **정밀 도킹 성공** — 좁은 카메라 화각(수평 27°)과 좌우 정렬 수렴 문제를 해결한 도킹
-  로직이 실제 충전 스테이션 정렬까지 도달했습니다.
-- **안전 기능 검증** — 후방 장애물 감지 정지(`OBSTACLE_STOP`)와 사람 감지 정지
-  (`PERSON_WAIT`)가 주행 중 실제로 동작하는 것을 확인했습니다.
+- 도킹은 카메라 화각이 좁고(수평 27°) 좌우 정렬이 수렴하지 않던 문제를 고친 뒤 충전 스테이션 정렬까지 도달했습니다.
+- 후방 장애물 감지 정지(`OBSTACLE_STOP`)와 사람 감지 정지(`PERSON_WAIT`)가 주행 중 동작하는 것을 확인했습니다.
 
-| 항목 | 실측 |
+| 항목 | 실측 (2026-08-18 실주행 1회) |
 |---|---|
-| 목적지(강의실1)까지 자율주행 | 5.66 m / **77초** |
-| 도착 위치 정밀도 | 오차 **3 mm** |
-| 도킹 지점 자동 복귀 | **43초** |
-| 전체 노드 상시 가동 | PM2로 8개 노드 `online` 안정 유지 |
+| 목적지(강의실1)까지 자율주행 | 5.66 m / 77초 |
+| 도킹 지점 자동 복귀 | 43초 |
+| 노드 가동 | PM2로 8개 노드 `online` 유지 |
 
 ---
 
-## 🎬 데모 영상
+## 데모 영상
 
-시연 전체 과정(자율주행 안내 → 목적지 도착 → 자동 복귀 → ArUco 정밀 도킹, 약 2분)을
-영상으로 담았습니다.
-
-▶️ **[전체 데모 영상 보기](docs/Demo_Video/Play_Demo.mp4)** — GitHub에서 파일을 클릭하면
-내장 플레이어로 바로 재생됩니다.
+[전체 데모 영상](docs/Demo_Video/Play_Demo.mp4) (약 2분): 자율주행 안내 → 목적지 도착 → 자동 복귀 → ArUco 도킹.
+GitHub에서 파일을 클릭하면 바로 재생됩니다.
 
 ---
 
@@ -157,6 +150,12 @@ com_ws/src/
 
 ### 빌드
 
+LiDAR 드라이버(`src/coin_d4_driver`)는 서브모듈이므로 함께 받습니다.
+
+```bash
+git clone --recurse-submodules <이 저장소 주소> ~/com_ws
+```
+
 ```bash
 cd ~/com_ws
 source /opt/ros/humble/setup.bash
@@ -230,10 +229,10 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 
 | 김찬중 | 권오민 |
 |---|---|
-| 서류 7종 + 발표 PPT 작성 | HMI(TFT+조이스틱), 목적지 메뉴 UI |
-| 환경 세팅, bringup + 카메라 캘리브레이션 | Nav2·SLAM 준비, 하드웨어 조립, 실공간 매핑 |
+| **service_manager** (상태머신·ArUco 정밀 도킹) | HMI(TFT+조이스틱), 목적지 메뉴 UI |
 | voice 음성 안내 | aruco 마커 인식·정밀 도킹 오차 계산·사람 감지 |
-| **service_manager** (상태머신·ArUco 정밀 도킹) | sensor_bridge, status(배터리·측정 로그·상태 발행) |
+| 환경 세팅, bringup + 카메라 캘리브레이션 | Nav2·SLAM 준비, 하드웨어 조립, 실공간 매핑 |
+| 서류 7종 + 발표 PPT 작성 | sensor_bridge, status(배터리·측정 로그·상태 발행) |
 
 **공동**: `com_interfaces` 메시지 정의, 통합 테스트 및 시연.
 
@@ -246,6 +245,4 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 
 - 일정/역할: `docs/schedule/TurtleBot3_간트차트_일일역할.xlsx` (일일 역할 분담 간트차트)
 - 데모 영상: `docs/Demo_Video/Play_Demo.mp4`
-
-- 저장소: `unitydt-ros2-class2-2026/com_main_project_01`
-- 팀: COM (김찬중, 권오민) · 로봇 실물: `192.168.210.15` (`ROS_DOMAIN_ID=30`)
+- 팀: COM (김찬중, 권오민)

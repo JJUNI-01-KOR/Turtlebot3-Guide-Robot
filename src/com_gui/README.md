@@ -115,8 +115,8 @@ self.flame_pub.publish(msg)
 
 GUI는 개발 PC에서 뜨고 pm2는 로봇(라즈베리파이4)에서 돌기 때문에,
 버튼은 로컬 pm2가 아니라 **SSH로 라즈베리파이에 접속해서** 그쪽 pm2에
-명령을 보낸다 (`main_window.PM2_SSH_USER` / `PM2_SSH_HOST`, 기본값
-`com@192.168.210.15`. 접속 정보가 바뀌면 이 두 값만 고치면 된다).
+명령을 보낸다 (`main_window.PM2_SSH_USER` / `PM2_SSH_HOST`. 접속 정보는
+환경변수 `COM_ROBOT_SSH_USER` / `COM_ROBOT_SSH_HOST`로 바꾼다).
 
 - 카드에는 항상 "대상: ssh → user@host" 캡션이 떠 있어서, 실제로 어디로
   명령이 나가는지 화면에서 바로 확인할 수 있다.
@@ -133,8 +133,8 @@ GUI(`QProcess`)는 터미널이 아니라서 SSH 비밀번호 프롬프트에 �
 개발 PC에서:
 ```bash
 ssh-keygen -t ed25519           # 이미 키가 있으면 생략
-ssh-copy-id com@192.168.210.15  # 라즈베리파이 실제 계정/주소로
-ssh com@192.168.210.15 'pm2 list'   # 비밀번호 안 물어보고 바로 목록이 나오면 성공
+ssh-copy-id <계정>@<로봇 주소>  # 라즈베리파이 실제 계정/주소로
+ssh <계정>@<로봇 주소> 'pm2 list'   # 비밀번호 안 물어보고 바로 목록이 나오면 성공
 ```
 
 ### 자주 겪는 문제
