@@ -247,8 +247,8 @@ ros2 service call /cancel_mission std_srvs/srv/Trigger   # 임무 취소 → REA
 
 | 김찬중 | 권오민 |
 |---|---|
-| **service_manager** (상태머신·ArUco 정밀 도킹) | HMI(TFT+조이스틱), 목적지 메뉴 UI |
-| voice 음성 안내 | aruco 마커 인식·정밀 도킹 오차 계산·사람 감지 |
+| **service_manager** (상태머신·ArUco 정밀 도킹) | voice 음성 안내 |
+| HMI(TFT+조이스틱), 목적지 메뉴 UI | aruco 마커 인식·정밀 도킹 오차 계산·사람 감지 |
 | 환경 세팅, bringup + 카메라 캘리브레이션 | Nav2·SLAM 준비, 하드웨어 조립, 실공간 매핑 |
 | 서류 7종 + 발표 PPT 작성 | sensor_bridge, status(배터리·측정 로그·상태 발행) |
 
